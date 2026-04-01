@@ -1,0 +1,18 @@
+[package]
+name = "bangida-backtest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bangida-core = { path = "../bangida-core" }
+bangida-data = { path = "../bangida-data" }
+bangida-strategy = { path = "../bangida-strategy" }
+bangida-risk = { path = "../bangida-risk" }
+bangida-execution = { path = "../bangida-execution" }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }

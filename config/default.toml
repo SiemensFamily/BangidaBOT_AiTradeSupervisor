@@ -1,0 +1,68 @@
+[general]
+mode = "paper"
+log_level = "info"
+
+[exchanges.binance]
+api_key = ""
+api_secret = ""
+base_url_rest = "https://testnet.binancefuture.com"
+base_url_ws = "wss://stream.binancefuture.com"
+testnet = true
+
+[exchanges.bybit]
+api_key = ""
+api_secret = ""
+base_url_rest = "https://api-testnet.bybit.com"
+base_url_ws = "wss://stream-testnet.bybit.com"
+testnet = true
+
+[trading]
+symbols = ["BTCUSDT", "ETHUSDT"]
+default_leverage = 10
+max_leverage = 15
+
+[risk]
+max_risk_per_trade_pct = 1.0
+max_daily_loss_pct = 5.0
+max_drawdown_pct = 15.0
+max_consecutive_losses = 5
+cooldown_minutes = 30
+min_equity = 50.0
+max_open_positions = 2
+max_trades_per_hour = 20
+max_leverage = 15
+
+[strategy.ob_imbalance]
+enabled = true
+weight = 0.50
+depth_levels = 5
+imbalance_threshold = 0.3
+hold_time_max_seconds = 30
+take_profit_ticks = 2
+stop_loss_ticks = 3
+
+[strategy.stat_arb]
+enabled = true
+weight = 0.25
+spread_window_seconds = 60
+entry_z_score = 2.0
+min_spread_pct = 0.05
+
+[strategy.momentum]
+enabled = true
+weight = 0.20
+breakout_period_seconds = 60
+volume_spike_multiplier = 3.0
+take_profit_pct = 0.3
+trailing_stop_pct = 0.15
+
+[strategy.funding_bias]
+enabled = true
+weight = 0.05
+high_funding_threshold = 0.05
+
+[database]
+path = "data/bangida.db"
+
+[monitoring]
+metrics_port = 9090

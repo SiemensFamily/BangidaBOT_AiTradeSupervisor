@@ -1,0 +1,15 @@
+[package]
+name = "bangida-risk"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bangida-core = { path = "../bangida-core" }
+bangida-data = { path = "../bangida-data" }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+parking_lot = { workspace = true }
