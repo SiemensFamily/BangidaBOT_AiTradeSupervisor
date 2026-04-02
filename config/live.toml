@@ -1,0 +1,24 @@
+# Live trading mode overrides
+# CAUTION: Real money at risk
+
+[general]
+mode = "live"
+log_level = "info"
+
+[exchanges.binance]
+testnet = false
+base_url_rest = "https://fapi.binance.com"
+base_url_ws = "wss://fstream.binance.com"
+
+[exchanges.bybit]
+testnet = false
+base_url_rest = "https://api.bybit.com"
+base_url_ws = "wss://stream.bybit.com"
+
+# Tighter risk for live
+[risk]
+max_risk_per_trade_pct = 0.75
+max_daily_loss_pct = 3.0
+max_drawdown_pct = 10.0
+max_consecutive_losses = 4
+cooldown_minutes = 60

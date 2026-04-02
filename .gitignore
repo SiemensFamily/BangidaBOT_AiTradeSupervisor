@@ -1,0 +1,29 @@
+# Build
+/target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data
+data/
+*.db
+*.db-journal
+
+# Secrets
+.env
+config/local.toml
+*.pem
+*.key
+
+# Logs
+*.log
+logs/

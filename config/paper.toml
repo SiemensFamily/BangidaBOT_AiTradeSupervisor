@@ -1,0 +1,16 @@
+# Paper trading mode overrides
+# Uses live market data but simulates order execution
+
+[general]
+mode = "paper"
+log_level = "debug"
+
+[exchanges.binance]
+testnet = false
+base_url_rest = "https://fapi.binance.com"
+base_url_ws = "wss://fstream.binance.com"
+
+[exchanges.bybit]
+testnet = false
+base_url_rest = "https://api.bybit.com"
+base_url_ws = "wss://stream.bybit.com"
