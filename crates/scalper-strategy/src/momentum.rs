@@ -1,6 +1,6 @@
 use rust_decimal::Decimal;
 use scalper_core::config::MomentumConfig;
-use scalper_core::types::{Exchange, Side, Signal, Trend};
+use scalper_core::types::{Side, Signal, Trend};
 use tracing::debug;
 
 use crate::traits::{MarketContext, Strategy};

@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use scalper_core::config::ExchangeConfig;
-use scalper_core::types::{Exchange, MarketEvent, Side};
+use scalper_core::types::{Exchange, MarketEvent};
 use tokio::sync::broadcast;
 use tokio::time::{self, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message};

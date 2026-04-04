@@ -1,4 +1,4 @@
-use scalper_core::types::{Exchange, Side, Signal, VolatilityRegime};
+use scalper_core::types::Side;
 use scalper_risk::risk_manager::RiskManager;
 use scalper_strategy::ensemble::EnsembleStrategy;
 use scalper_strategy::traits::MarketContext;
@@ -62,7 +62,7 @@ impl BacktestEngine {
 
         // Simple simulation: assume trade hits TP with probability based on signal strength
         // This is a simplified model — a real backtest would need tick-by-tick replay
-        let (exit_price, hit_tp) = if signal.strength > 0.5 {
+        let (exit_price, _hit_tp) = if signal.strength > 0.5 {
             (tp.unwrap_or(price_f64), true)
         } else {
             (sl.unwrap_or(price_f64), false)

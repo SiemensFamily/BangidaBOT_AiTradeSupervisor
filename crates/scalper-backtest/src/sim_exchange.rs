@@ -1,5 +1,3 @@
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 
 /// Simulated exchange for backtesting — fills orders with configurable slippage.
 pub struct SimExchange {

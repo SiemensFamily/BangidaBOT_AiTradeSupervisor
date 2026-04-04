@@ -1,5 +1,6 @@
 /// Tracks profit/loss, equity curve, and performance metrics.
 pub struct PnlTracker {
+    #[allow(dead_code)]
     starting_equity: f64,
     current_equity: f64,
     peak_equity: f64,

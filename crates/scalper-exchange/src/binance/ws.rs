@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
@@ -8,7 +8,7 @@ use std::str::FromStr;
 use tokio::sync::broadcast;
 use tokio::time::{self, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use super::models::*;
 use crate::traits::MarketDataFeed;

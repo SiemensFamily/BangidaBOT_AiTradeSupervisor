@@ -112,7 +112,7 @@ impl OrderManager for BybitClient {
         }
 
         let resp = req.body(payload).send().await.context("Bybit place_order failed")?;
-        let status = resp.status();
+        let _status = resp.status();
         let body_text = resp.text().await.unwrap_or_default();
 
         let response: BybitResponse<BybitOrderResult> =

@@ -4,7 +4,6 @@ use reqwest::Client;
 use rust_decimal::Decimal;
 use scalper_core::config::ExchangeConfig;
 use scalper_core::types::{Exchange, OrderType, Side, TimeInForce};
-use std::str::FromStr;
 use tracing::{debug, warn};
 
 use super::auth;

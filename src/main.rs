@@ -540,7 +540,7 @@ async fn build_market_context(
     let obv_val = ind.obv.as_ref().map(|i| i.value()).unwrap_or(0.0);
     let vwap_val = ind.vwap.as_ref().map(|i| i.value()).unwrap_or(0.0);
 
-    let (macd_line, signal_line, histogram) = ind
+    let (_macd_line, _signal_line, histogram) = ind
         .macd
         .as_ref()
         .map(|m| m.lines())
