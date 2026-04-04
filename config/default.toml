@@ -32,6 +32,10 @@ base_url_rest = "https://futures.kraken.com"
 base_url_ws = "wss://futures.kraken.com/ws/v1"
 testnet = false
 
+[exchanges.kraken.symbol_map]
+BTCUSDT = "PI_XBTUSD"
+ETHUSDT = "PI_ETHUSD"
+
 [trading]
 symbols = ["BTCUSDT", "ETHUSDT"]
 default_leverage = 10

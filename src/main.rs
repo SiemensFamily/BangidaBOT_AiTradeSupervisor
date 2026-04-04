@@ -322,55 +322,70 @@ fn build_strategies(config: &ScalperConfig) -> Vec<Box<dyn Strategy>> {
 }
 
 /// Spawn WebSocket feed tasks for each configured exchange.
+fn map_symbols(symbols: &[String], cfg: &scalper_core::config::ExchangeConfig) -> Vec<String> {
+    symbols
+        .iter()
+        .map(|s| cfg.symbol_map.get(s).cloned().unwrap_or_else(|| s.clone()))
+        .collect()
+}
+
 fn spawn_exchange_feeds(config: &ScalperConfig, market_tx: broadcast::Sender<MarketEvent>) {
     let symbols = config.trading.symbols.clone();
 
     if let Some(ref binance_cfg) = config.exchanges.binance {
-        let feed = scalper_exchange::binance::BinanceWsFeed::new(binance_cfg.clone());
-        let tx = market_tx.clone();
-        let syms = symbols.clone();
-        tokio::spawn(async move {
-            if let Err(e) = scalper_exchange::MarketDataFeed::subscribe(&feed, &syms, tx).await {
-                error!("Binance feed error: {e}");
-            }
-        });
-        info!("Binance WebSocket feed spawned");
+        if !binance_cfg.api_key.is_empty() {
+            let feed = scalper_exchange::binance::BinanceWsFeed::new(binance_cfg.clone());
+            let tx = market_tx.clone();
+            let syms = map_symbols(&symbols, binance_cfg);
+            tokio::spawn(async move {
+                if let Err(e) = scalper_exchange::MarketDataFeed::subscribe(&feed, &syms, tx).await {
+                    error!("Binance feed error: {e}");
+                }
+            });
+            info!("Binance WebSocket feed spawned");
+        }
     }
 
     if let Some(ref bybit_cfg) = config.exchanges.bybit {
-        let feed = scalper_exchange::bybit::BybitWsFeed::new(bybit_cfg.clone());
-        let tx = market_tx.clone();
-        let syms = symbols.clone();
-        tokio::spawn(async move {
-            if let Err(e) = scalper_exchange::MarketDataFeed::subscribe(&feed, &syms, tx).await {
-                error!("Bybit feed error: {e}");
-            }
-        });
-        info!("Bybit WebSocket feed spawned");
+        if !bybit_cfg.api_key.is_empty() {
+            let feed = scalper_exchange::bybit::BybitWsFeed::new(bybit_cfg.clone());
+            let tx = market_tx.clone();
+            let syms = map_symbols(&symbols, bybit_cfg);
+            tokio::spawn(async move {
+                if let Err(e) = scalper_exchange::MarketDataFeed::subscribe(&feed, &syms, tx).await {
+                    error!("Bybit feed error: {e}");
+                }
+            });
+            info!("Bybit WebSocket feed spawned");
+        }
     }
 
     if let Some(ref okx_cfg) = config.exchanges.okx {
-        let feed = scalper_exchange::okx::OkxWsFeed::new(okx_cfg.clone());
-        let tx = market_tx.clone();
-        let syms = symbols.clone();
-        tokio::spawn(async move {
-            if let Err(e) = scalper_exchange::MarketDataFeed::subscribe(&feed, &syms, tx).await {
-                error!("OKX feed error: {e}");
-            }
-        });
-        info!("OKX WebSocket feed spawned");
+        if !okx_cfg.api_key.is_empty() {
+            let feed = scalper_exchange::okx::OkxWsFeed::new(okx_cfg.clone());
+            let tx = market_tx.clone();
+            let syms = symbols.clone(); // OKX uses standard symbols
+            tokio::spawn(async move {
+                if let Err(e) = scalper_exchange::MarketDataFeed::subscribe(&feed, &syms, tx).await {
+                    error!("OKX feed error: {e}");
+                }
+            });
+            info!("OKX WebSocket feed spawned");
+        }
     }
 
     if let Some(ref kraken_cfg) = config.exchanges.kraken {
-        let feed = scalper_exchange::kraken::KrakenWsFeed::new(kraken_cfg.clone());
-        let tx = market_tx.clone();
-        let syms = symbols.clone();
-        tokio::spawn(async move {
-            if let Err(e) = scalper_exchange::MarketDataFeed::subscribe(&feed, &syms, tx).await {
-                error!("Kraken feed error: {e}");
-            }
-        });
-        info!("Kraken WebSocket feed spawned");
+        if !kraken_cfg.api_key.is_empty() {
+            let feed = scalper_exchange::kraken::KrakenWsFeed::new(kraken_cfg.clone());
+            let tx = market_tx.clone();
+            let syms = map_symbols(&symbols, kraken_cfg);
+            tokio::spawn(async move {
+                if let Err(e) = scalper_exchange::MarketDataFeed::subscribe(&feed, &syms, tx).await {
+                    error!("Kraken feed error: {e}");
+                }
+            });
+            info!("Kraken WebSocket feed spawned");
+        }
     }
 }
 

@@ -29,6 +29,9 @@ pub struct ExchangeConfig {
     pub base_url_rest: String,
     pub base_url_ws: String,
     pub testnet: bool,
+    /// Per-exchange symbol mapping, e.g. { "BTCUSDT" = "PI_XBTUSD" } for Kraken.
+    #[serde(default)]
+    pub symbol_map: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
