@@ -1,61 +1,70 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/bangida-core",
-    "crates/bangida-exchange",
-    "crates/bangida-data",
-    "crates/bangida-strategy",
-    "crates/bangida-risk",
-    "crates/bangida-execution",
-    "crates/bangida-backtest",
-    "crates/bangida-ml",
+    "crates/scalper-core",
+    "crates/scalper-data",
+    "crates/scalper-exchange",
+    "crates/scalper-strategy",
+    "crates/scalper-risk",
+    "crates/scalper-execution",
+    "crates/scalper-backtest",
 ]
+
+[package]
+name = "crypto-scalper"
+version = "0.1.0"
+edition = "2021"
+description = "Ultra-low-latency crypto futures scalping bot optimized for small accounts"
+
+[[bin]]
+name = "crypto-scalper"
+path = "src/main.rs"
+
+[dependencies]
+scalper-core = { path = "crates/scalper-core" }
+scalper-data = { path = "crates/scalper-data" }
+scalper-exchange = { path = "crates/scalper-exchange" }
+scalper-strategy = { path = "crates/scalper-strategy" }
+scalper-risk = { path = "crates/scalper-risk" }
+scalper-execution = { path = "crates/scalper-execution" }
+scalper-backtest = { path = "crates/scalper-backtest" }
+
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow = "1"
+dotenvy = "0.15"
+config = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal_macros = "1"
+chrono = { version = "0.4", features = ["serde"] }
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
-reqwest = { version = "0.12", features = ["json", "native-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rust_decimal = { version = "1", features = ["serde-with-str"] }
 rust_decimal_macros = "1"
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-config = "0.14"
 thiserror = "2"
 anyhow = "1"
+async-trait = "0.1"
 parking_lot = "0.12"
-crossbeam = "0.8"
+dashmap = "6"
+reqwest = { version = "0.12", features = ["json"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
-rusqlite = { version = "0.32", features = ["bundled"] }
+config = "0.14"
 url = "2"
-futures-util = "0.3"
-dashmap = "6"
-smallvec = "1"
-async-trait = "0.1"
 
-[package]
-name = "bangida-bot"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-bangida-core = { path = "crates/bangida-core" }
-bangida-exchange = { path = "crates/bangida-exchange" }
-bangida-data = { path = "crates/bangida-data" }
-bangida-strategy = { path = "crates/bangida-strategy" }
-bangida-risk = { path = "crates/bangida-risk" }
-bangida-execution = { path = "crates/bangida-execution" }
-bangida-backtest = { path = "crates/bangida-backtest" }
-bangida-ml = { path = "crates/bangida-ml" }
-tokio = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-anyhow = { workspace = true }
-config = { workspace = true }
-serde = { workspace = true }
-rust_decimal = { workspace = true }
-rust_decimal_macros = { workspace = true }
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
