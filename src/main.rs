@@ -24,6 +24,7 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{error, info, warn};
 
 mod dashboard;
+mod paper_sim;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -71,6 +72,7 @@ async fn main() -> Result<()> {
     let (market_tx, _) = broadcast::channel::<MarketEvent>(8192);
     let (signal_tx, mut signal_rx) = mpsc::channel::<Signal>(256);
     let (order_tx, mut order_rx) = mpsc::channel::<ValidatedSignal>(256);
+    let (sim_tx, mut sim_rx) = mpsc::channel::<paper_sim::SimOrder>(256);
 
     // Data aggregation state (shared across tasks)
     let orderbooks: Arc<Mutex<HashMap<String, OrderBook>>> =
@@ -186,6 +188,11 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Shared config + trade history (needed by fill simulator and dashboard)
+    let shared_config = Arc::new(tokio::sync::RwLock::new(config.clone()));
+    let trade_history: Arc<Mutex<Vec<dashboard::TradeRecord>>> =
+        Arc::new(Mutex::new(Vec::new()));
+
     // Task e: Executor — order_rx → place orders via exchange REST API
     {
         let executor = executor.clone();
@@ -213,8 +220,9 @@ async fn main() -> Result<()> {
 
                 // In live mode, this would call exchange.place_order(...)
                 // For now, track the order in the order tracker
+                let order_id = format!("sim-{}", validated.signal.timestamp_ms);
                 let managed = scalper_execution::order_tracker::ManagedOrder {
-                    order_id: format!("sim-{}", validated.signal.timestamp_ms),
+                    order_id: order_id.clone(),
                     symbol: prepared.symbol.clone(),
                     exchange: prepared.exchange,
                     side: prepared.side,
@@ -229,6 +237,40 @@ async fn main() -> Result<()> {
                     updated_ms: validated.signal.timestamp_ms,
                 };
                 order_tracker.track(managed);
+
+                // Send to paper fill simulator
+                let _ = sim_tx.send(paper_sim::SimOrder {
+                    order_id,
+                    symbol: prepared.symbol.clone(),
+                    side: prepared.side,
+                    entry_price: prepared.price.unwrap_or_default(),
+                    quantity: prepared.quantity,
+                    take_profit: validated.signal.take_profit.unwrap_or_default(),
+                    stop_loss: validated.signal.stop_loss.unwrap_or_default(),
+                }).await;
+            }
+        });
+    }
+
+    // Task e2: Paper fill simulator — simulates order fills against market data
+    {
+        let mut market_rx = market_tx.subscribe();
+        let order_tracker = order_tracker.clone();
+        let risk_manager = risk_manager.clone();
+        let trade_history = trade_history.clone();
+
+        tokio::spawn(async move {
+            info!("Paper fill simulator task started");
+            let mut sim = paper_sim::PaperFillSim::new();
+            loop {
+                tokio::select! {
+                    Ok(event) = market_rx.recv() => {
+                        sim.on_market_event(event, &order_tracker, &risk_manager, &trade_history).await;
+                    }
+                    Some(order) = sim_rx.recv() => {
+                        sim.add_order(order);
+                    }
+                }
             }
         });
     }
@@ -269,11 +311,6 @@ async fn main() -> Result<()> {
             }
         });
     }
-
-    // Shared config + trade history for dashboard
-    let shared_config = Arc::new(tokio::sync::RwLock::new(config.clone()));
-    let trade_history: Arc<Mutex<Vec<dashboard::TradeRecord>>> =
-        Arc::new(Mutex::new(Vec::new()));
 
     // Task h: Web dashboard
     {
