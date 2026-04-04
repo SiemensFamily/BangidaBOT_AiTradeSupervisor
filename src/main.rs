@@ -31,13 +31,14 @@ async fn main() -> Result<()> {
     // Load environment variables from .env file
     let _ = dotenvy::dotenv();
 
-    // Initialize tracing
+    // Initialize tracing (compact human-readable format)
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
-        .json()
+        .compact()
+        .with_target(false)
         .init();
 
     info!("Crypto Scalper starting...");
@@ -86,7 +87,42 @@ async fn main() -> Result<()> {
     let regime_detector: Arc<Mutex<RegimeDetector>> =
         Arc::new(Mutex::new(RegimeDetector::new()));
 
+    // Shared config + trade history + logs (needed across all tasks)
+    let shared_config = Arc::new(tokio::sync::RwLock::new(config.clone()));
+    let trade_history: Arc<Mutex<Vec<dashboard::TradeRecord>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let signal_log: Arc<Mutex<Vec<dashboard::SignalRecord>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let console_log: Arc<Mutex<dashboard::ConsoleLog>> =
+        Arc::new(Mutex::new(dashboard::ConsoleLog::new(500)));
+
+    // Log startup messages to console
+    {
+        let mut cl = console_log.lock().await;
+        cl.push("INFO", "Starting Crypto Scalper Bot...".to_string());
+        cl.push("INFO", format!("Mode: {} | Symbols: {:?}", config.general.mode, config.trading.symbols));
+        cl.push("INFO", format!("Leverage: {}x | Min Equity: ${:.2}", config.trading.default_leverage, config.risk.min_equity));
+        cl.push("SUCCESS", "Configuration loaded successfully".to_string());
+        cl.push("SUCCESS", format!("Loaded {} strategies", build_strategies(&config).len()));
+        cl.push("INFO", format!("Risk manager initialized with ${:.2} equity", initial_equity));
+    }
+
     // Task a: Spawn exchange WebSocket feeds → market_tx
+    {
+        let mut cl = console_log.lock().await;
+        if config.exchanges.binance.as_ref().map_or(false, |c| !c.api_key.is_empty()) {
+            cl.push("SUCCESS", "Binance WebSocket feed connecting...".to_string());
+        }
+        if config.exchanges.bybit.as_ref().map_or(false, |c| !c.api_key.is_empty()) {
+            cl.push("SUCCESS", "Bybit WebSocket feed connecting...".to_string());
+        }
+        if config.exchanges.okx.as_ref().map_or(false, |c| !c.api_key.is_empty()) {
+            cl.push("SUCCESS", "OKX WebSocket feed connecting...".to_string());
+        }
+        if config.exchanges.kraken.as_ref().map_or(false, |c| !c.api_key.is_empty()) {
+            cl.push("SUCCESS", "Kraken WebSocket feed connecting...".to_string());
+        }
+    }
     spawn_exchange_feeds(&config, market_tx.clone());
 
     // Task b: Data aggregator — market_rx → update orderbook, indicators, candles
@@ -133,6 +169,8 @@ async fn main() -> Result<()> {
         let candle_mgr = candle_mgr.clone();
         let order_flow = order_flow.clone();
         let regime_detector = regime_detector.clone();
+        let signal_log = signal_log.clone();
+        let console_log = console_log.clone();
 
         tokio::spawn(async move {
             info!("Strategy engine task started");
@@ -153,6 +191,35 @@ async fn main() -> Result<()> {
 
                     if let Some(ctx) = ctx {
                         if let Some(signal) = ensemble.evaluate(&ctx) {
+                            let confidence = signal.confidence;
+                            let side_str = format!("{:?}", signal.side);
+
+                            // Log signal to analyst log
+                            let regime_str = format!("{:?}", ctx.volatility_regime);
+                            let ema_trend = if ctx.ema_9 > ctx.ema_21 { "UP" }
+                                else if ctx.ema_9 < ctx.ema_21 { "DOWN" }
+                                else { "FLAT" };
+
+                            signal_log.lock().await.push(dashboard::SignalRecord {
+                                timestamp_ms: signal.timestamp_ms,
+                                symbol: symbol.clone(),
+                                side: side_str.clone(),
+                                action: "TAKE".to_string(),
+                                score: confidence * 100.0,
+                                rsi: ctx.rsi_14,
+                                ema_trend: ema_trend.to_string(),
+                                atr: ctx.atr_14,
+                                regime: regime_str.clone(),
+                                imbalance: ctx.imbalance_ratio,
+                                cvd: ctx.cvd,
+                                reason: format!("Ensemble score {:.0}% — conditions favorable", confidence * 100.0),
+                            });
+
+                            console_log.lock().await.push("SUCCESS", format!(
+                                "Signal: {} {} | Confidence: {:.0}% | RSI: {:.1} | Regime: {}",
+                                symbol, side_str, confidence * 100.0, ctx.rsi_14, regime_str
+                            ));
+
                             if signal_tx.send(signal).await.is_err() {
                                 return;
                             }
@@ -168,6 +235,8 @@ async fn main() -> Result<()> {
         let risk_manager = risk_manager.clone();
         let regime_detector = regime_detector.clone();
         let indicators = indicators.clone();
+        let signal_log = signal_log.clone();
+        let console_log = console_log.clone();
 
         tokio::spawn(async move {
             info!("Risk pipeline task started");
@@ -176,27 +245,62 @@ async fn main() -> Result<()> {
                 let regime = regime_detector.lock().await.regime();
                 let ind = indicators.lock().await;
                 let atr = ind.atr.as_ref().map(|a| a.value());
-                let price = decimal_to_f64(signal.take_profit.unwrap_or_default()); // approximate
+                let rsi_val = ind.rsi.as_ref().map(|i| i.value()).unwrap_or(50.0);
+                let price = decimal_to_f64(signal.take_profit.unwrap_or_default());
                 let now_ms = signal.timestamp_ms;
 
+                let side_str = format!("{:?}", signal.side);
+                let symbol = signal.symbol.clone();
+                let confidence = signal.confidence;
+
                 if let Some(validated) = rm.validate_signal(&signal, regime, atr, price, now_ms) {
+                    console_log.lock().await.push("SUCCESS", format!(
+                        "Risk APPROVED: {} {} | Size: {} | TP: {} | SL: {}",
+                        symbol, side_str, validated.quantity,
+                        signal.take_profit.map_or("-".to_string(), |p| p.to_string()),
+                        signal.stop_loss.map_or("-".to_string(), |p| p.to_string()),
+                    ));
+
                     if order_tx.send(validated).await.is_err() {
                         break;
                     }
+                } else {
+                    // Log rejected signal
+                    let reason = if !rm.circuit_breaker().can_trade(now_ms) {
+                        "circuit breaker active"
+                    } else {
+                        "risk limits exceeded"
+                    };
+
+                    signal_log.lock().await.push(dashboard::SignalRecord {
+                        timestamp_ms: now_ms,
+                        symbol: symbol.clone(),
+                        side: side_str.clone(),
+                        action: "SKIP".to_string(),
+                        score: confidence * 100.0,
+                        rsi: rsi_val,
+                        ema_trend: String::new(),
+                        atr: atr.unwrap_or(0.0),
+                        regime: format!("{:?}", regime),
+                        imbalance: 0.0,
+                        cvd: 0.0,
+                        reason: reason.to_string(),
+                    });
+
+                    console_log.lock().await.push("WARN", format!(
+                        "Risk REJECTED: {} {} | Reason: {}",
+                        symbol, side_str, reason
+                    ));
                 }
             }
         });
     }
 
-    // Shared config + trade history (needed by fill simulator and dashboard)
-    let shared_config = Arc::new(tokio::sync::RwLock::new(config.clone()));
-    let trade_history: Arc<Mutex<Vec<dashboard::TradeRecord>>> =
-        Arc::new(Mutex::new(Vec::new()));
-
     // Task e: Executor — order_rx → place orders via exchange REST API
     {
         let executor = executor.clone();
         let order_tracker = order_tracker.clone();
+        let console_log = console_log.clone();
 
         tokio::spawn(async move {
             info!("Executor task started");
@@ -238,6 +342,14 @@ async fn main() -> Result<()> {
                 };
                 order_tracker.track(managed);
 
+                console_log.lock().await.push("SUCCESS", format!(
+                    "Order placed: {} {} {} @ {} | TP: {} | SL: {}",
+                    order_id, prepared.symbol, format!("{:?}", prepared.side),
+                    prepared.price.map_or("MARKET".to_string(), |p| p.to_string()),
+                    validated.signal.take_profit.map_or("-".to_string(), |p| p.to_string()),
+                    validated.signal.stop_loss.map_or("-".to_string(), |p| p.to_string()),
+                ));
+
                 // Send to paper fill simulator
                 let _ = sim_tx.send(paper_sim::SimOrder {
                     order_id,
@@ -258,6 +370,7 @@ async fn main() -> Result<()> {
         let order_tracker = order_tracker.clone();
         let risk_manager = risk_manager.clone();
         let trade_history = trade_history.clone();
+        let console_log = console_log.clone();
 
         tokio::spawn(async move {
             info!("Paper fill simulator task started");
@@ -265,7 +378,7 @@ async fn main() -> Result<()> {
             loop {
                 tokio::select! {
                     Ok(event) = market_rx.recv() => {
-                        sim.on_market_event(event, &order_tracker, &risk_manager, &trade_history).await;
+                        sim.on_market_event(event, &order_tracker, &risk_manager, &trade_history, &console_log).await;
                     }
                     Some(order) = sim_rx.recv() => {
                         sim.add_order(order);
@@ -292,22 +405,88 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Task g: PnL reporter
+    // Task g: Heartbeat pulse + PnL reporter (console log)
     {
         let risk_manager = risk_manager.clone();
+        let console_log = console_log.clone();
+        let indicators = indicators.clone();
+        let regime_detector = regime_detector.clone();
+        let order_tracker = order_tracker.clone();
+        let symbols = config.trading.symbols.clone();
+        let orderbooks = orderbooks.clone();
+
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            info!("Heartbeat pulse task started");
+            let mut tick_count: u64 = 0;
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
             loop {
                 interval.tick().await;
-                let rm = risk_manager.lock().await;
-                let tracker = rm.pnl_tracker();
-                info!(
-                    equity = tracker.equity(),
-                    drawdown = format!("{:.1}%", tracker.drawdown_pct()),
-                    win_rate = format!("{:.1}%", tracker.win_rate() * 100.0),
-                    trades = tracker.total_trades(),
-                    "PnL Report"
-                );
+                tick_count += 1;
+
+                let ind = indicators.lock().await;
+                let (ind_ready, ind_total) = ind.readiness();
+                let rsi_val = ind.rsi.as_ref().map(|i| i.value()).unwrap_or(0.0);
+                let atr_val = ind.atr.as_ref().map(|i| i.value()).unwrap_or(0.0);
+                drop(ind);
+
+                let rd = regime_detector.lock().await;
+                let regime = format!("{:?}", rd.regime());
+                let regime_ready = rd.is_ready();
+                drop(rd);
+
+                let open_count = order_tracker.open_orders().len();
+
+                let obs = orderbooks.lock().await;
+                let connected_symbols: Vec<&String> = symbols.iter()
+                    .filter(|s| obs.contains_key(*s))
+                    .collect();
+                drop(obs);
+
+                let mut cl = console_log.lock().await;
+
+                // Warmup status (first 2 minutes)
+                if !regime_ready || ind_ready < ind_total {
+                    cl.push("WARN", format!(
+                        "Warming up... Indicators: {}/{} | Regime: {} | Feeds: {}/{}",
+                        ind_ready, ind_total,
+                        if regime_ready { "ready" } else { "warming" },
+                        connected_symbols.len(), symbols.len()
+                    ));
+                    continue;
+                }
+
+                // Regular heartbeat every 10s
+                cl.push("INFO", format!(
+                    "Scanning {} symbols | Regime: {} | RSI: {:.1} | ATR: {:.4} | Open: {} | Feeds: {}/{}",
+                    symbols.len(), regime, rsi_val, atr_val, open_count,
+                    connected_symbols.len(), symbols.len()
+                ));
+
+                // PnL report every 60s (every 6th tick)
+                if tick_count % 6 == 0 {
+                    let rm = risk_manager.lock().await;
+                    let tracker = rm.pnl_tracker();
+                    let pnl = tracker.total_pnl();
+                    let wr = tracker.win_rate() * 100.0;
+                    let trades = tracker.total_trades();
+                    let dd = tracker.drawdown_pct();
+                    drop(rm);
+
+                    info!(
+                        equity_pnl = format!("{:.2}", pnl),
+                        drawdown = format!("{:.1}%", dd),
+                        win_rate = format!("{:.1}%", wr),
+                        trades = trades,
+                        "PnL Report"
+                    );
+
+                    if trades > 0 {
+                        cl.push("INFO", format!(
+                            "PnL Report | P&L: ${:.2} | Win Rate: {:.1}% | Trades: {} | Drawdown: {:.1}%",
+                            pnl, wr, trades, dd
+                        ));
+                    }
+                }
             }
         });
     }
@@ -326,9 +505,19 @@ async fn main() -> Result<()> {
             indicators: indicators.clone(),
             config: shared_config,
             trade_history,
+            signal_log,
+            console_log: console_log.clone(),
             ws_tx,
         };
         tokio::spawn(dashboard::start_dashboard(dash_state));
+    }
+
+    // Log final startup
+    {
+        let mut cl = console_log.lock().await;
+        cl.push("SUCCESS", format!("All tasks spawned. Crypto Scalper is running."));
+        cl.push("INFO", format!("Dashboard available at http://localhost:3000"));
+        cl.push("SUCCESS", format!("Crypto Scalper Bot | {}", config.general.mode.to_uppercase()));
     }
 
     info!("All tasks spawned. Crypto Scalper is running in {} mode.", mode);

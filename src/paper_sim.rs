@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
-use crate::dashboard::TradeRecord;
+use crate::dashboard::{ConsoleLog, TradeRecord};
 
 /// Order info sent from the executor to the fill simulator.
 pub struct SimOrder {
@@ -60,6 +60,7 @@ impl PaperFillSim {
         order_tracker: &Arc<OrderTracker>,
         risk_manager: &Arc<Mutex<RiskManager>>,
         trade_history: &Arc<Mutex<Vec<TradeRecord>>>,
+        console_log: &Arc<Mutex<ConsoleLog>>,
     ) {
         let (symbol, trade_price, timestamp_ms) = match &event {
             MarketEvent::Trade {
@@ -115,6 +116,12 @@ impl PaperFillSim {
                     qty = %order.quantity,
                     "Paper fill: order entered"
                 );
+
+                console_log.lock().await.push("SUCCESS", format!(
+                    "FILLED: {} {:?} {} @ {} | TP: {} | SL: {}",
+                    order.symbol, order.side, order.quantity, fill_price,
+                    order.take_profit, order.stop_loss
+                ));
 
                 filled_ids.push(id.clone());
             }
@@ -205,6 +212,14 @@ impl PaperFillSim {
                     .await
                     .on_trade_result(gross_pnl, fees, timestamp_ms);
 
+                let net_pnl = gross_pnl - fees;
+                let pnl_color = if net_pnl >= 0.0 { "SUCCESS" } else { "ERROR" };
+                console_log.lock().await.push(pnl_color, format!(
+                    "CLOSED: {} {:?} | Entry: {} Exit: {} | P&L: ${:.2} ({}) | Fees: ${:.4}",
+                    pos.symbol, pos.side, pos.entry_price, exit_price,
+                    net_pnl, if is_tp { "TP" } else { "SL" }, fees
+                ));
+
                 // Record trade in history
                 trade_history.lock().await.push(TradeRecord {
                     timestamp_ms,
@@ -212,9 +227,13 @@ impl PaperFillSim {
                     side: format!("{:?}", pos.side),
                     price: exit_price.to_string(),
                     quantity: pos.quantity.to_string(),
-                    pnl: gross_pnl - fees,
+                    pnl: net_pnl,
                     fees,
                     order_id: id.clone(),
+                    entry_price: pos.entry_price.to_string(),
+                    exit_price: exit_price.to_string(),
+                    duration_secs: 0.0, // TODO: track entry time
+                    status: "CLOSED".to_string(),
                 });
 
                 closed_ids.push(id.clone());

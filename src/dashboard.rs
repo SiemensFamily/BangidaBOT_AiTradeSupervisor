@@ -20,6 +20,8 @@ use scalper_data::regime::RegimeDetector;
 use scalper_execution::order_tracker::OrderTracker;
 use scalper_risk::risk_manager::RiskManager;
 
+use scalper_data::indicators::Indicator;
+
 use crate::IndicatorState;
 
 // ── Trade history ──────────────────────────────────────────────────────────
@@ -34,6 +36,72 @@ pub struct TradeRecord {
     pub pnl: f64,
     pub fees: f64,
     pub order_id: String,
+    #[serde(default)]
+    pub entry_price: String,
+    #[serde(default)]
+    pub exit_price: String,
+    #[serde(default)]
+    pub duration_secs: f64,
+    #[serde(default)]
+    pub status: String,
+}
+
+// ── Signal / Analyst log ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SignalRecord {
+    pub timestamp_ms: u64,
+    pub symbol: String,
+    pub side: String,
+    pub action: String,         // TAKE, REDUCE, SKIP, SKIP_PAPER
+    pub score: f64,             // ensemble confidence 0-100
+    pub rsi: f64,
+    pub ema_trend: String,      // "UP" / "DOWN" / "FLAT"
+    pub atr: f64,
+    pub regime: String,
+    pub imbalance: f64,
+    pub cvd: f64,
+    pub reason: String,         // why taken/skipped
+}
+
+// ── Console log buffer ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConsoleEntry {
+    pub timestamp_ms: u64,
+    pub level: String,      // INFO, WARN, ERROR, SUCCESS
+    pub message: String,
+}
+
+/// Ring buffer for console log entries (keeps last N entries).
+pub struct ConsoleLog {
+    entries: Vec<ConsoleEntry>,
+    max_entries: usize,
+}
+
+impl ConsoleLog {
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(max_entries),
+            max_entries,
+        }
+    }
+
+    pub fn push(&mut self, level: &str, message: String) {
+        let entry = ConsoleEntry {
+            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+            level: level.to_string(),
+            message,
+        };
+        if self.entries.len() >= self.max_entries {
+            self.entries.remove(0);
+        }
+        self.entries.push(entry);
+    }
+
+    pub fn entries(&self) -> &[ConsoleEntry] {
+        &self.entries
+    }
 }
 
 // ── Shared state ───────────────────────────────────────────────────────────
@@ -50,6 +118,8 @@ pub struct DashboardState {
     pub indicators: Arc<Mutex<IndicatorState>>,
     pub config: Arc<RwLock<ScalperConfig>>,
     pub trade_history: Arc<Mutex<Vec<TradeRecord>>>,
+    pub signal_log: Arc<Mutex<Vec<SignalRecord>>>,
+    pub console_log: Arc<Mutex<ConsoleLog>>,
     pub ws_tx: broadcast::Sender<String>,
 }
 
@@ -88,6 +158,22 @@ struct Snapshot {
     regime_ready: bool,
     regime_atr_count: usize,
     regime_atr_needed: usize,
+    // Indicators
+    rsi: f64,
+    ema_9: f64,
+    ema_21: f64,
+    atr: f64,
+    // History
+    trades: Vec<TradeRecord>,
+    signals: Vec<SignalRecord>,
+    console: Vec<ConsoleEntry>,
+    // Extended stats
+    total_wins: u64,
+    total_losses: u64,
+    avg_win: f64,
+    avg_loss: f64,
+    best_trade: f64,
+    worst_trade: f64,
 }
 
 #[derive(Serialize)]
@@ -269,9 +355,13 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
     let regime_atr_count = rd.atr_count();
     drop(rd);
 
-    // Indicators warmup
+    // Indicators warmup + values
     let ind = state.indicators.lock().await;
     let (indicators_ready, indicators_total) = ind.readiness();
+    let rsi = ind.rsi.as_ref().map(|i| i.value()).unwrap_or(0.0);
+    let ema_9 = ind.ema_9.as_ref().map(|i| i.value()).unwrap_or(0.0);
+    let ema_21 = ind.ema_21.as_ref().map(|i| i.value()).unwrap_or(0.0);
+    let atr = ind.atr.as_ref().map(|i| i.value()).unwrap_or(0.0);
     drop(ind);
 
     let warmup_ready = regime_ready && indicators_ready == indicators_total;
@@ -311,6 +401,28 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
         })
         .collect();
 
+    // Trade history + extended stats
+    let trades_vec = state.trade_history.lock().await;
+    let trades: Vec<TradeRecord> = trades_vec.clone();
+    let (total_wins, total_losses, avg_win, avg_loss, best_trade, worst_trade) = {
+        let wins: Vec<f64> = trades.iter().filter(|t| t.pnl > 0.0).map(|t| t.pnl).collect();
+        let losses: Vec<f64> = trades.iter().filter(|t| t.pnl <= 0.0).map(|t| t.pnl).collect();
+        let tw = wins.len() as u64;
+        let tl = losses.len() as u64;
+        let aw = if tw > 0 { wins.iter().sum::<f64>() / tw as f64 } else { 0.0 };
+        let al = if tl > 0 { losses.iter().sum::<f64>() / tl as f64 } else { 0.0 };
+        let best = wins.iter().cloned().fold(0.0f64, f64::max);
+        let worst = losses.iter().cloned().fold(0.0f64, f64::min);
+        (tw, tl, aw, al, best, worst)
+    };
+    drop(trades_vec);
+
+    // Signal log
+    let signals = state.signal_log.lock().await.clone();
+
+    // Console log
+    let console = state.console_log.lock().await.entries().to_vec();
+
     Snapshot {
         timestamp_ms: now_ms,
         mode: state.config_mode.clone(),
@@ -338,5 +450,18 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
         regime_ready,
         regime_atr_count,
         regime_atr_needed,
+        rsi,
+        ema_9,
+        ema_21,
+        atr,
+        trades,
+        signals,
+        console,
+        total_wins,
+        total_losses,
+        avg_win,
+        avg_loss,
+        best_trade,
+        worst_trade,
     }
 }
