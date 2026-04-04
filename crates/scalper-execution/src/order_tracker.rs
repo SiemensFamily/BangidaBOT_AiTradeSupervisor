@@ -1,6 +1,7 @@
-use dashmap::DashMap;
+use parking_lot::RwLock;
 use rust_decimal::Decimal;
 use scalper_core::types::{Exchange, OrderType, Side, TimeInForce};
+use std::collections::HashMap;
 use tracing::warn;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,23 +57,23 @@ pub struct ManagedOrder {
     pub updated_ms: u64,
 }
 
-/// Concurrent order tracker backed by DashMap for lock-free reads.
+/// Concurrent order tracker backed by RwLock<HashMap>.
 pub struct OrderTracker {
-    orders: DashMap<String, ManagedOrder>,
+    orders: RwLock<HashMap<String, ManagedOrder>>,
     auto_cancel_timeout_ms: u64,
 }
 
 impl OrderTracker {
     pub fn new(auto_cancel_timeout_ms: u64) -> Self {
         Self {
-            orders: DashMap::new(),
+            orders: RwLock::new(HashMap::new()),
             auto_cancel_timeout_ms,
         }
     }
 
     /// Begin tracking a new order.
     pub fn track(&self, order: ManagedOrder) {
-        self.orders.insert(order.order_id.clone(), order);
+        self.orders.write().insert(order.order_id.clone(), order);
     }
 
     /// Update an existing order's fill state and status.
@@ -86,8 +87,8 @@ impl OrderTracker {
         status: &str,
         now_ms: u64,
     ) {
-        if let Some(mut entry) = self.orders.get_mut(order_id) {
-            let order = entry.value_mut();
+        let mut orders = self.orders.write();
+        if let Some(order) = orders.get_mut(order_id) {
             let old_filled = order.filled_qty;
             let old_avg = order.avg_fill_price;
             let new_filled = filled_qty;
@@ -112,20 +113,21 @@ impl OrderTracker {
 
     /// Retrieve a snapshot of a single order.
     pub fn get(&self, order_id: &str) -> Option<ManagedOrder> {
-        self.orders.get(order_id).map(|entry| entry.clone())
+        self.orders.read().get(order_id).cloned()
     }
 
     /// Return all orders that are still open (New or PartiallyFilled).
     pub fn open_orders(&self) -> Vec<ManagedOrder> {
         self.orders
-            .iter()
-            .filter(|entry| {
+            .read()
+            .values()
+            .filter(|order| {
                 matches!(
-                    entry.value().status,
+                    order.status,
                     OrderStatus::New | OrderStatus::PartiallyFilled
                 )
             })
-            .map(|entry| entry.value().clone())
+            .cloned()
             .collect()
     }
 
@@ -134,9 +136,9 @@ impl OrderTracker {
     pub fn stale_orders(&self, now_ms: u64) -> Vec<String> {
         let threshold = Decimal::from(80) / Decimal::from(100); // 0.80
         self.orders
+            .read()
             .iter()
-            .filter(|entry| {
-                let order = entry.value();
+            .filter(|(_, order)| {
                 let is_open = matches!(
                     order.status,
                     OrderStatus::New | OrderStatus::PartiallyFilled
@@ -151,14 +153,14 @@ impl OrderTracker {
                 let is_underfilled = fill_ratio < threshold;
                 is_open && is_stale && is_underfilled
             })
-            .map(|entry| entry.key().clone())
+            .map(|(key, _)| key.clone())
             .collect()
     }
 
     /// Remove terminal orders (Filled, Cancelled, Rejected, Expired) that are
     /// older than `max_age_ms` relative to `now_ms`.
     pub fn remove_terminal(&self, max_age_ms: u64, now_ms: u64) {
-        self.orders.retain(|_key, order| {
+        self.orders.write().retain(|_, order| {
             if order.status.is_terminal() {
                 let age = now_ms.saturating_sub(order.updated_ms);
                 age <= max_age_ms
