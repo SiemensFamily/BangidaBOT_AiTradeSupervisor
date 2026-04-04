@@ -23,6 +23,8 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{error, info, warn};
 
+mod dashboard;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load environment variables from .env file
@@ -268,7 +270,24 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Task h: Web dashboard
+    {
+        let (ws_tx, _) = broadcast::channel::<String>(64);
+        let dash_state = dashboard::DashboardState {
+            config_mode: config.general.mode.clone(),
+            config_symbols: config.trading.symbols.clone(),
+            start_time_ms: chrono::Utc::now().timestamp_millis() as u64,
+            risk_manager: risk_manager.clone(),
+            order_tracker: order_tracker.clone(),
+            orderbooks: orderbooks.clone(),
+            regime_detector: regime_detector.clone(),
+            ws_tx,
+        };
+        tokio::spawn(dashboard::start_dashboard(dash_state));
+    }
+
     info!("All tasks spawned. Crypto Scalper is running in {} mode.", mode);
+    info!("Dashboard available at http://localhost:3000");
     info!("Press Ctrl+C to stop.");
 
     // Graceful shutdown on SIGINT/SIGTERM

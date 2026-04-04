@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crypto Scalper Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { background:#0d1117; color:#c9d1d9; font-family:'Segoe UI',system-ui,sans-serif; }
+        .header { display:flex; justify-content:space-between; align-items:center;
+                   padding:14px 24px; background:#161b22; border-bottom:1px solid #30363d; }
+        .header h1 { font-size:1.1em; font-weight:700; color:#58a6ff; letter-spacing:0.5px; }
+        .mode { font-size:0.9em; font-weight:600; padding:3px 10px; border-radius:4px; }
+        .mode.paper { background:#f0ad4e22; color:#f0ad4e; }
+        .mode.live { background:#e74c3c22; color:#e74c3c; }
+        .meta { color:#8b949e; font-size:0.82em; }
+        .status-dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:4px; }
+        .status-dot.ok { background:#2ea043; }
+        .status-dot.off { background:#f85149; }
+
+        .grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; padding:16px 24px; }
+        .card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px; }
+        .card h3 { color:#58a6ff; font-size:0.78em; text-transform:uppercase;
+                    margin-bottom:10px; letter-spacing:1.2px; }
+        .big-num { font-size:2.2em; font-weight:700; line-height:1.1; margin-bottom:8px; }
+        .row { display:flex; justify-content:space-between; padding:4px 0;
+               border-bottom:1px solid #21262d; font-size:0.88em; }
+        .row:last-child { border-bottom:none; }
+        .lbl { color:#8b949e; }
+        .pos { color:#2ea043; }
+        .neg { color:#f85149; }
+
+        .badge { padding:2px 10px; border-radius:4px; font-size:0.78em; font-weight:600; }
+        .badge.ok { background:#2ea04322; color:#2ea043; }
+        .badge.warn { background:#f0ad4e22; color:#f0ad4e; }
+        .badge.halt { background:#f8514922; color:#f85149; }
+
+        .chart-card { grid-column: 1 / -1; }
+        #equityChart { width:100%; height:220px; }
+
+        table { width:100%; border-collapse:collapse; font-size:0.82em; }
+        th { text-align:left; color:#8b949e; padding:6px 8px; border-bottom:1px solid #30363d; font-weight:500; }
+        td { padding:6px 8px; border-bottom:1px solid #21262d; }
+        .empty-msg { color:#484f58; text-align:center; padding:20px; font-size:0.88em; }
+
+        .wide { grid-column: span 2; }
+        @media (max-width:1000px) { .grid { grid-template-columns:1fr; } .wide { grid-column:span 1; } }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div style="display:flex;align-items:center;gap:16px;">
+            <h1>CRYPTO SCALPER</h1>
+            <span class="mode" id="mode">PAPER</span>
+            <span class="meta">Uptime: <span id="uptime">--</span></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+            <span class="status-dot off" id="wsDot"></span>
+            <span class="meta" id="wsLabel">Connecting...</span>
+        </div>
+    </div>
+
+    <div class="grid">
+        <!-- Equity Card -->
+        <div class="card">
+            <h3>Equity</h3>
+            <div class="big-num" id="equity">$100.00</div>
+            <div class="row"><span class="lbl">Daily PnL</span><span id="dailyPnl">--</span></div>
+            <div class="row"><span class="lbl">Total PnL</span><span id="totalPnl">--</span></div>
+            <div class="row"><span class="lbl">Drawdown</span><span id="drawdown">--</span></div>
+            <div class="row"><span class="lbl">Fees Paid</span><span id="fees">--</span></div>
+        </div>
+
+        <!-- Performance Card -->
+        <div class="card">
+            <h3>Performance</h3>
+            <div class="row"><span class="lbl">Total Trades</span><span id="totalTrades">0</span></div>
+            <div class="row"><span class="lbl">Win Rate</span><span id="winRate">--</span></div>
+            <div class="row"><span class="lbl">Profit Factor</span><span id="profitFactor">--</span></div>
+            <div class="row"><span class="lbl">Expectancy</span><span id="expectancy">--</span></div>
+        </div>
+
+        <!-- Risk Panel -->
+        <div class="card">
+            <h3>Risk / Circuit Breaker</h3>
+            <div class="row">
+                <span class="lbl">Trading</span>
+                <span class="badge ok" id="canTrade">ACTIVE</span>
+            </div>
+            <div class="row"><span class="lbl">Consec. Losses</span><span id="consecLosses">0</span></div>
+            <div class="row"><span class="lbl">Trades/Hour</span><span id="tradesHour">0</span></div>
+            <div class="row"><span class="lbl">Daily Loss</span><span id="dailyLoss">$0.00</span></div>
+            <div class="row">
+                <span class="lbl">Regime</span>
+                <span class="badge warn" id="regime">--</span>
+            </div>
+        </div>
+
+        <!-- Equity Curve -->
+        <div class="card chart-card">
+            <h3>Equity Curve</h3>
+            <canvas id="equityChart"></canvas>
+        </div>
+
+        <!-- Open Orders -->
+        <div class="card wide">
+            <h3>Open Orders</h3>
+            <table>
+                <thead><tr><th>ID</th><th>Symbol</th><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>Status</th></tr></thead>
+                <tbody id="ordersBody"></tbody>
+            </table>
+            <div class="empty-msg" id="noOrders">No open orders</div>
+        </div>
+
+        <!-- Market Data -->
+        <div class="card">
+            <h3>Market Data</h3>
+            <table>
+                <thead><tr><th>Symbol</th><th>Bid</th><th>Ask</th><th>Spread</th></tr></thead>
+                <tbody id="marketsBody"></tbody>
+            </table>
+            <div class="empty-msg" id="noMarkets">Waiting for data...</div>
+        </div>
+    </div>
+
+<script>
+const ctx = document.getElementById('equityChart').getContext('2d');
+const eqData = {
+    labels: [],
+    datasets: [{
+        label: 'Equity',
+        data: [],
+        borderColor: '#58a6ff',
+        backgroundColor: 'rgba(88,166,255,0.08)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 0,
+        borderWidth: 2
+    }]
+};
+const chart = new Chart(ctx, {
+    type: 'line',
+    data: eqData,
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+            x: { display: true, ticks: { color:'#484f58', maxTicksLimit:12, font:{size:10} }, grid: { color:'#21262d' } },
+            y: { ticks: { color:'#484f58', callback: v=>'$'+v.toFixed(2), font:{size:10} }, grid: { color:'#21262d' } }
+        },
+        plugins: { legend: { display: false } },
+        animation: { duration: 0 }
+    }
+});
+
+const MAX_PTS = 600;
+const pnlCls = v => v >= 0 ? 'pos' : 'neg';
+const fmt$ = v => (v >= 0 ? '+' : '') + '$' + v.toFixed(2);
+
+function updateUI(d) {
+    // Header
+    const m = document.getElementById('mode');
+    m.textContent = d.mode.toUpperCase();
+    m.className = 'mode ' + d.mode;
+    const mins = Math.floor(d.uptime_secs / 60);
+    const hrs = Math.floor(mins / 60);
+    document.getElementById('uptime').textContent =
+        hrs > 0 ? hrs+'h '+(mins%60)+'m' : mins+'m '+(d.uptime_secs%60)+'s';
+
+    // Equity
+    document.getElementById('equity').textContent = '$' + d.equity.toFixed(2);
+    document.getElementById('equity').className = 'big-num ' + pnlCls(d.equity - d.starting_equity);
+    const dp = document.getElementById('dailyPnl');
+    dp.textContent = fmt$(d.daily_pnl); dp.className = pnlCls(d.daily_pnl);
+    const tp = document.getElementById('totalPnl');
+    tp.textContent = fmt$(d.total_pnl); tp.className = pnlCls(d.total_pnl);
+    const dd = document.getElementById('drawdown');
+    dd.textContent = d.drawdown_pct.toFixed(2) + '%';
+    dd.className = d.drawdown_pct > 5 ? 'neg' : '';
+    document.getElementById('fees').textContent = '$' + d.total_fees.toFixed(2);
+
+    // Performance
+    document.getElementById('totalTrades').textContent = d.total_trades;
+    document.getElementById('winRate').textContent = (d.win_rate * 100).toFixed(1) + '%';
+    document.getElementById('profitFactor').textContent =
+        d.profit_factor > 9999 ? '∞' : d.profit_factor.toFixed(2);
+    const ex = document.getElementById('expectancy');
+    ex.textContent = fmt$(d.expectancy); ex.className = pnlCls(d.expectancy);
+
+    // Risk
+    const ct = document.getElementById('canTrade');
+    ct.textContent = d.can_trade ? 'ACTIVE' : 'HALTED';
+    ct.className = 'badge ' + (d.can_trade ? 'ok' : 'halt');
+    document.getElementById('consecLosses').textContent = d.consecutive_losses;
+    document.getElementById('tradesHour').textContent = d.trades_this_hour;
+    document.getElementById('dailyLoss').textContent = '$' + d.daily_loss.toFixed(2);
+    const rg = document.getElementById('regime');
+    rg.textContent = d.regime;
+    rg.className = 'badge ' + (d.regime==='Normal'?'ok': d.regime==='Extreme'?'halt':'warn');
+
+    // Chart
+    const t = new Date(d.timestamp_ms).toLocaleTimeString();
+    eqData.labels.push(t);
+    eqData.datasets[0].data.push(d.equity);
+    if (eqData.labels.length > MAX_PTS) { eqData.labels.shift(); eqData.datasets[0].data.shift(); }
+    chart.update();
+
+    // Orders
+    const ob = document.getElementById('ordersBody');
+    const no = document.getElementById('noOrders');
+    if (d.open_orders.length === 0) { ob.innerHTML=''; no.style.display='block'; }
+    else {
+        no.style.display='none';
+        ob.innerHTML = d.open_orders.map(o =>
+            `<tr><td>${o.order_id.slice(0,12)}</td><td>${o.symbol}</td>`+
+            `<td class="${o.side==='Buy'?'pos':'neg'}">${o.side}</td>`+
+            `<td>${o.price}</td><td>${o.quantity}</td><td>${o.filled_qty}</td>`+
+            `<td>${o.status}</td></tr>`
+        ).join('');
+    }
+
+    // Markets
+    const mb = document.getElementById('marketsBody');
+    const nm = document.getElementById('noMarkets');
+    if (d.markets.length === 0) { mb.innerHTML=''; nm.style.display='block'; }
+    else {
+        nm.style.display='none';
+        mb.innerHTML = d.markets.map(m =>
+            `<tr><td>${m.symbol}</td><td>${m.best_bid}</td><td>${m.best_ask}</td><td>${m.spread}</td></tr>`
+        ).join('');
+    }
+}
+
+function connect() {
+    const ws = new WebSocket('ws://' + location.host + '/ws');
+    const dot = document.getElementById('wsDot');
+    const lbl = document.getElementById('wsLabel');
+    ws.onopen = () => { dot.className='status-dot ok'; lbl.textContent='Connected'; };
+    ws.onclose = () => { dot.className='status-dot off'; lbl.textContent='Reconnecting...'; setTimeout(connect, 2000); };
+    ws.onerror = () => ws.close();
+    ws.onmessage = e => { try { updateUI(JSON.parse(e.data)); } catch(err) { console.error(err); } };
+}
+connect();
+</script>
+</body>
+</html>

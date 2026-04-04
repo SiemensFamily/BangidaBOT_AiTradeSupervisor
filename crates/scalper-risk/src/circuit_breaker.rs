@@ -140,6 +140,26 @@ impl CircuitBreaker {
         self.inner.lock().current_equity
     }
 
+    /// Get consecutive loss count.
+    pub fn consecutive_losses(&self) -> u32 {
+        self.inner.lock().consecutive_losses
+    }
+
+    /// Get trades this hour.
+    pub fn trades_this_hour(&self) -> u32 {
+        self.inner.lock().trades_this_hour
+    }
+
+    /// Get accumulated daily loss.
+    pub fn daily_loss(&self) -> f64 {
+        self.inner.lock().daily_loss
+    }
+
+    /// Get cooldown end timestamp.
+    pub fn cooldown_until_ms(&self) -> u64 {
+        self.inner.lock().cooldown_until_ms
+    }
+
     /// Get current drawdown percentage from peak.
     pub fn drawdown_pct(&self) -> f64 {
         let inner = self.inner.lock();

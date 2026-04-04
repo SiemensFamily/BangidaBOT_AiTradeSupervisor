@@ -110,6 +110,31 @@ impl PnlTracker {
         self.total_trades
     }
 
+    /// Daily PnL.
+    pub fn daily_pnl(&self) -> f64 {
+        self.daily_pnl
+    }
+
+    /// Total cumulative PnL.
+    pub fn total_pnl(&self) -> f64 {
+        self.total_pnl
+    }
+
+    /// Total fees paid.
+    pub fn total_fees(&self) -> f64 {
+        self.total_fees
+    }
+
+    /// Starting equity.
+    pub fn starting_equity(&self) -> f64 {
+        self.starting_equity
+    }
+
+    /// Peak equity reached.
+    pub fn peak_equity(&self) -> f64 {
+        self.peak_equity
+    }
+
     /// Reset daily PnL counter only.
     pub fn reset_daily(&mut self) {
         self.daily_pnl = 0.0;
