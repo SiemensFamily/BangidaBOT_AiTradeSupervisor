@@ -1,19 +1,22 @@
-FROM rust:1.77-slim AS builder
+FROM rust:1.82-slim-bookworm AS builder
 
+WORKDIR /app
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
-COPY . .
-RUN cargo build --release
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+COPY src/ src/
+
+RUN cargo build --release --bin crypto-scalper
 
 FROM debian:bookworm-slim
-
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /app/target/release/bangida-bot /usr/local/bin/
-COPY config/ /app/config/
+RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-RUN mkdir -p data
+COPY --from=builder /app/target/release/crypto-scalper /app/crypto-scalper
+COPY config/ /app/config/
 
-CMD ["bangida-bot"]
+ENV RUST_LOG=info
+EXPOSE 8080
+
+ENTRYPOINT ["/app/crypto-scalper"]

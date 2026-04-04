@@ -1,24 +1,11 @@
-# Live trading mode overrides
-# CAUTION: Real money at risk
-
+# Live trading overrides — more conservative than paper
 [general]
 mode = "live"
-log_level = "info"
 
-[exchanges.binance]
-testnet = false
-base_url_rest = "https://fapi.binance.com"
-base_url_ws = "wss://fstream.binance.com"
-
-[exchanges.bybit]
-testnet = false
-base_url_rest = "https://api.bybit.com"
-base_url_ws = "wss://stream.bybit.com"
-
-# Tighter risk for live
 [risk]
-max_risk_per_trade_pct = 0.75
-max_daily_loss_pct = 3.0
-max_drawdown_pct = 10.0
-max_consecutive_losses = 4
-cooldown_minutes = 60
+max_risk_per_trade_pct = 2.0      # Reduced risk for real money
+max_daily_loss_pct = 7.0
+max_drawdown_pct = 20.0
+max_consecutive_losses = 2        # Tighter halt trigger
+cooldown_minutes = 30             # Longer cooldown
+max_trades_per_hour = 10

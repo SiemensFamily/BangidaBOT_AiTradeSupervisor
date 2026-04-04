@@ -1,0 +1,14 @@
+[package]
+name = "scalper-backtest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+scalper-core = { path = "../scalper-core" }
+scalper-data = { path = "../scalper-data" }
+scalper-strategy = { path = "../scalper-strategy" }
+scalper-risk = { path = "../scalper-risk" }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }

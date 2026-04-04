@@ -1,6 +1,5 @@
 [general]
 mode = "paper"
-log_level = "info"
 
 [exchanges.binance]
 api_key = ""
@@ -16,53 +15,75 @@ base_url_rest = "https://api-testnet.bybit.com"
 base_url_ws = "wss://stream-testnet.bybit.com"
 testnet = true
 
+# OKX — best for $100 accounts ($1 minimum order, -0.025% maker rebate)
+[exchanges.okx]
+api_key = ""
+api_secret = ""
+passphrase = ""
+base_url_rest = "https://www.okx.com"
+base_url_ws = "wss://ws.okx.com:8443"
+testnet = false
+
+# Kraken Futures
+[exchanges.kraken]
+api_key = ""
+api_secret = ""
+base_url_rest = "https://futures.kraken.com"
+base_url_ws = "wss://futures.kraken.com/ws/v1"
+testnet = false
+
+[exchanges.kraken.symbol_map]
+BTCUSDT = "PI_XBTUSD"
+ETHUSDT = "PI_ETHUSD"
+
 [trading]
 symbols = ["BTCUSDT", "ETHUSDT"]
 default_leverage = 10
-max_leverage = 15
+max_leverage = 20
 
+# Risk management — tuned for $100 starting capital
 [risk]
-max_risk_per_trade_pct = 1.0
-max_daily_loss_pct = 5.0
-max_drawdown_pct = 15.0
-max_consecutive_losses = 5
-cooldown_minutes = 30
-min_equity = 50.0
-max_open_positions = 2
-max_trades_per_hour = 20
-max_leverage = 15
+max_risk_per_trade_pct = 3.0      # $3 risk per trade on $100
+max_daily_loss_pct = 10.0         # $10 max daily loss
+max_drawdown_pct = 25.0           # 25% peak drawdown limit
+max_consecutive_losses = 3        # 3 losses = 15min cooldown
+cooldown_minutes = 15             # Short recovery for rapid growth
+min_equity = 25.0                 # Hard floor — stop trading at $25
+max_open_positions = 1            # One trade at a time (capital constraint)
+max_trades_per_hour = 15          # Controlled frequency
+max_leverage = 20                 # Up to 20x
 
-[strategy.ob_imbalance]
-enabled = true
-weight = 0.50
-depth_levels = 5
-imbalance_threshold = 0.3
-hold_time_max_seconds = 30
-take_profit_ticks = 2
-stop_loss_ticks = 3
-
-[strategy.stat_arb]
-enabled = true
-weight = 0.25
-spread_window_seconds = 60
-entry_z_score = 2.0
-min_spread_pct = 0.05
+# Strategy configuration
+[strategy]
+ensemble_threshold = 0.20         # Minimum weighted strength to emit signal
 
 [strategy.momentum]
 enabled = true
-weight = 0.20
-breakout_period_seconds = 60
-volume_spike_multiplier = 3.0
-take_profit_pct = 0.3
-trailing_stop_pct = 0.15
+weight = 0.40                     # PRIMARY strategy
+volume_spike_multiplier = 2.5
+take_profit_pct = 0.50            # 0.50% TP
+stop_loss_pct = 0.25              # 0.25% SL (2:1 R:R)
+trailing_stop_pct = 0.20
+rsi_overbought = 80.0
+rsi_oversold = 20.0
+
+[strategy.ob_imbalance]
+enabled = true
+weight = 0.25                     # SECONDARY strategy
+imbalance_threshold = 0.30        # Require 30% imbalance
+take_profit_ticks = 3
+stop_loss_ticks = 2
+
+[strategy.liquidation_wick]
+enabled = true
+weight = 0.20                     # Reversal strategy
+price_velocity_threshold = 1.0    # 1% move in 30s
+volume_spike_multiplier = 3.0     # 3x avg liquidation volume
+take_profit_pct = 0.80
+stop_loss_pct = 0.40
 
 [strategy.funding_bias]
 enabled = true
-weight = 0.05
-high_funding_threshold = 0.05
-
-[database]
-path = "data/bangida.db"
-
-[monitoring]
-metrics_port = 9090
+weight = 0.15                     # SUPPLEMENTARY
+funding_threshold = 0.05          # 5% funding rate
+strength_boost = 0.10             # +0.1 signal boost

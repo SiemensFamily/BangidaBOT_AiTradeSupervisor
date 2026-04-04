@@ -1,29 +1,8 @@
-# Build
-/target/
+/target
 **/*.rs.bk
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Data
-data/
-*.db
-*.db-journal
-
-# Secrets
+*.pdb
 .env
-config/local.toml
-*.pem
-*.key
-
-# Logs
-*.log
+*.db
+*.sqlite
+data/
 logs/

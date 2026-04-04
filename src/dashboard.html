@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crypto Scalper Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { background:#0d1117; color:#c9d1d9; font-family:'Segoe UI',system-ui,sans-serif; }
+        .header { display:flex; justify-content:space-between; align-items:center;
+                   padding:14px 24px; background:#161b22; border-bottom:1px solid #30363d; }
+        .header h1 { font-size:1.1em; font-weight:700; color:#58a6ff; letter-spacing:0.5px; }
+        .mode { font-size:0.9em; font-weight:600; padding:3px 10px; border-radius:4px; }
+        .mode.paper { background:#f0ad4e22; color:#f0ad4e; }
+        .mode.live { background:#e74c3c22; color:#e74c3c; }
+        .meta { color:#8b949e; font-size:0.82em; }
+        .status-dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:4px; }
+        .status-dot.ok { background:#2ea043; }
+        .status-dot.off { background:#f85149; }
+
+        /* Warmup banner */
+        .warmup-banner { background:#161b22; border-bottom:1px solid #30363d; padding:12px 24px; }
+        .warmup-banner.ready { background:#2ea04318; border-color:#2ea043; }
+        .warmup-title { font-size:0.88em; font-weight:600; margin-bottom:8px; color:#f0ad4e; }
+        .warmup-banner.ready .warmup-title { color:#2ea043; }
+        .prog-row { display:flex; align-items:center; gap:10px; margin-bottom:6px; font-size:0.82em; }
+        .prog-row:last-child { margin-bottom:0; }
+        .prog-lbl { width:140px; color:#8b949e; }
+        .prog-bar { flex:1; height:8px; background:#21262d; border-radius:4px; overflow:hidden; }
+        .prog-fill { height:100%; background:#f0ad4e; border-radius:4px; transition:width 0.3s; }
+        .prog-fill.done { background:#2ea043; }
+        .prog-val { width:60px; text-align:right; color:#c9d1d9; }
+
+        /* Tabs */
+        .tab-bar { display:flex; gap:0; background:#161b22; border-bottom:1px solid #30363d; padding:0 24px; }
+        .tab-btn { background:none; border:none; color:#8b949e; font-size:0.88em; padding:10px 18px;
+                   cursor:pointer; border-bottom:2px solid transparent; font-family:inherit; }
+        .tab-btn:hover { color:#c9d1d9; }
+        .tab-btn.active { color:#58a6ff; border-bottom-color:#58a6ff; }
+        .tab-content { display:none; }
+        .tab-content.active { display:block; }
+
+        /* Grid & cards */
+        .grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; padding:16px 24px; }
+        .card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px; }
+        .card h3 { color:#58a6ff; font-size:0.78em; text-transform:uppercase;
+                    margin-bottom:10px; letter-spacing:1.2px; }
+        .big-num { font-size:2.2em; font-weight:700; line-height:1.1; margin-bottom:8px; }
+        .row { display:flex; justify-content:space-between; padding:4px 0;
+               border-bottom:1px solid #21262d; font-size:0.88em; }
+        .row:last-child { border-bottom:none; }
+        .lbl { color:#8b949e; }
+        .pos { color:#2ea043; }
+        .neg { color:#f85149; }
+        .badge { padding:2px 10px; border-radius:4px; font-size:0.78em; font-weight:600; }
+        .badge.ok { background:#2ea04322; color:#2ea043; }
+        .badge.warn { background:#f0ad4e22; color:#f0ad4e; }
+        .badge.halt { background:#f8514922; color:#f85149; }
+        .chart-card { grid-column: 1 / -1; }
+        .chart-wrap { position:relative; width:100%; height:220px; }
+        table { width:100%; border-collapse:collapse; font-size:0.82em; }
+        th { text-align:left; color:#8b949e; padding:6px 8px; border-bottom:1px solid #30363d; font-weight:500; }
+        td { padding:6px 8px; border-bottom:1px solid #21262d; }
+        .empty-msg { color:#484f58; text-align:center; padding:20px; font-size:0.88em; }
+        .wide { grid-column: span 2; }
+        .dash-header { display:flex; justify-content:space-between; align-items:center; padding:12px 24px 0; }
+        .btn { background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:6px 14px;
+               border-radius:6px; font-size:0.82em; cursor:pointer; text-decoration:none; font-family:inherit; }
+        .btn:hover { background:#30363d; }
+        .btn-primary { background:#238636; border-color:#2ea043; color:#fff; }
+        .btn-primary:hover { background:#2ea043; }
+
+        /* Settings */
+        .settings-wrap { padding:16px 24px; max-width:900px; }
+        .settings-section { background:#161b22; border:1px solid #30363d; border-radius:8px;
+                            margin-bottom:14px; overflow:hidden; }
+        .settings-section h3 { padding:12px 16px; margin:0; font-size:0.85em; color:#58a6ff;
+                                cursor:pointer; user-select:none; border-bottom:1px solid #30363d; }
+        .settings-section h3:hover { background:#21262d; }
+        .settings-body { padding:12px 16px; display:none; }
+        .settings-body.open { display:block; }
+        .field { display:flex; align-items:center; gap:12px; margin-bottom:10px; }
+        .field label { width:200px; font-size:0.82em; color:#8b949e; flex-shrink:0; }
+        .field input, .field select { background:#0d1117; border:1px solid #30363d; color:#c9d1d9;
+                                      padding:6px 10px; border-radius:4px; font-size:0.82em; flex:1;
+                                      font-family:inherit; }
+        .field input:focus, .field select:focus { outline:none; border-color:#58a6ff; }
+        .field input[type=checkbox] { flex:none; width:16px; height:16px; }
+        .save-bar { display:flex; gap:12px; align-items:center; margin-top:14px; }
+        .toast { font-size:0.82em; padding:6px 12px; border-radius:4px; }
+        .toast.ok { background:#2ea04322; color:#2ea043; }
+        .toast.err { background:#f8514922; color:#f85149; }
+
+        /* Trade Logic */
+        .logic-wrap { padding:16px 24px; max-width:1000px; }
+        .logic-card { background:#161b22; border:1px solid #30363d; border-radius:8px;
+                      padding:16px; margin-bottom:14px; }
+        .logic-card h3 { color:#58a6ff; font-size:0.92em; margin-bottom:10px; }
+        .logic-card h4 { color:#c9d1d9; font-size:0.85em; margin:10px 0 6px; }
+        .logic-card p, .logic-card li { font-size:0.82em; color:#8b949e; line-height:1.6; }
+        .logic-card ul { padding-left:20px; }
+        .logic-card code { background:#21262d; padding:1px 5px; border-radius:3px; color:#f0ad4e; font-size:0.9em; }
+        .regime-tbl { width:100%; border-collapse:collapse; margin:8px 0; }
+        .regime-tbl th, .regime-tbl td { padding:6px 12px; border:1px solid #30363d; font-size:0.82em; text-align:center; }
+        .regime-tbl th { background:#21262d; color:#58a6ff; }
+
+        @media (max-width:1000px) { .grid { grid-template-columns:1fr; } .wide { grid-column:span 1; } }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div style="display:flex;align-items:center;gap:16px;">
+            <h1>CRYPTO SCALPER</h1>
+            <span class="mode" id="mode">PAPER</span>
+            <span class="meta">Uptime: <span id="uptime">--</span></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+            <span class="status-dot off" id="wsDot"></span>
+            <span class="meta" id="wsLabel">Connecting...</span>
+        </div>
+    </div>
+
+    <!-- Warmup Banner -->
+    <div class="warmup-banner" id="warmupBanner">
+        <div class="warmup-title" id="warmupTitle">System Warming Up...</div>
+        <div class="prog-row">
+            <span class="prog-lbl">Indicators</span>
+            <div class="prog-bar"><div class="prog-fill" id="indProg" style="width:0%"></div></div>
+            <span class="prog-val" id="indVal">0/8</span>
+        </div>
+        <div class="prog-row">
+            <span class="prog-lbl">Regime Detector</span>
+            <div class="prog-bar"><div class="prog-fill" id="regProg" style="width:0%"></div></div>
+            <span class="prog-val" id="regVal">0/50</span>
+        </div>
+    </div>
+
+    <!-- Tab Bar -->
+    <div class="tab-bar">
+        <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
+        <button class="tab-btn" onclick="switchTab('settings')">Settings</button>
+        <button class="tab-btn" onclick="switchTab('tradelogic')">Trade Logic</button>
+    </div>
+
+    <!-- Dashboard Tab -->
+    <div class="tab-content active" id="tab-dashboard">
+        <div class="dash-header">
+            <span></span>
+            <a href="/api/trades.csv" class="btn" download>Export Trades CSV</a>
+        </div>
+        <div class="grid">
+            <div class="card">
+                <h3>Equity</h3>
+                <div class="big-num" id="equity">$100.00</div>
+                <div class="row"><span class="lbl">Daily PnL</span><span id="dailyPnl">--</span></div>
+                <div class="row"><span class="lbl">Total PnL</span><span id="totalPnl">--</span></div>
+                <div class="row"><span class="lbl">Drawdown</span><span id="drawdown">--</span></div>
+                <div class="row"><span class="lbl">Fees Paid</span><span id="fees">--</span></div>
+            </div>
+            <div class="card">
+                <h3>Performance</h3>
+                <div class="row"><span class="lbl">Total Trades</span><span id="totalTrades">0</span></div>
+                <div class="row"><span class="lbl">Win Rate</span><span id="winRate">--</span></div>
+                <div class="row"><span class="lbl">Profit Factor</span><span id="profitFactor">--</span></div>
+                <div class="row"><span class="lbl">Expectancy</span><span id="expectancy">--</span></div>
+            </div>
+            <div class="card">
+                <h3>Risk / Circuit Breaker</h3>
+                <div class="row"><span class="lbl">Trading</span><span class="badge ok" id="canTrade">ACTIVE</span></div>
+                <div class="row"><span class="lbl">Consec. Losses</span><span id="consecLosses">0</span></div>
+                <div class="row"><span class="lbl">Trades/Hour</span><span id="tradesHour">0</span></div>
+                <div class="row"><span class="lbl">Daily Loss</span><span id="dailyLoss">$0.00</span></div>
+                <div class="row"><span class="lbl">Regime</span><span class="badge warn" id="regime">--</span></div>
+            </div>
+            <div class="card chart-card">
+                <h3>Equity Curve</h3>
+                <div class="chart-wrap"><canvas id="equityChart"></canvas></div>
+            </div>
+            <div class="card wide">
+                <h3>Open Orders</h3>
+                <table><thead><tr><th>ID</th><th>Symbol</th><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>Status</th></tr></thead>
+                <tbody id="ordersBody"></tbody></table>
+                <div class="empty-msg" id="noOrders">No open orders</div>
+            </div>
+            <div class="card">
+                <h3>Market Data</h3>
+                <table><thead><tr><th>Symbol</th><th>Bid</th><th>Ask</th><th>Spread</th></tr></thead>
+                <tbody id="marketsBody"></tbody></table>
+                <div class="empty-msg" id="noMarkets">Waiting for data...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Tab -->
+    <div class="tab-content" id="tab-settings">
+        <div class="settings-wrap">
+            <div class="settings-section">
+                <h3 onclick="toggleSection(this)">General</h3>
+                <div class="settings-body open">
+                    <div class="field"><label>Mode</label>
+                        <select id="cfg-mode"><option value="paper">Paper</option><option value="live">Live</option></select></div>
+                </div>
+            </div>
+            <div class="settings-section">
+                <h3 onclick="toggleSection(this)">Exchanges &mdash; Binance</h3>
+                <div class="settings-body">
+                    <div class="field"><label>API Key</label><input type="password" id="cfg-binance-key"></div>
+                    <div class="field"><label>API Secret</label><input type="password" id="cfg-binance-secret"></div>
+                    <div class="field"><label>REST URL</label><input id="cfg-binance-rest"></div>
+                    <div class="field"><label>WebSocket URL</label><input id="cfg-binance-ws"></div>
+                    <div class="field"><label>Testnet</label><input type="checkbox" id="cfg-binance-testnet"></div>
+                </div>
+            </div>
+            <div class="settings-section">
+                <h3 onclick="toggleSection(this)">Exchanges &mdash; Bybit</h3>
+                <div class="settings-body">
+                    <div class="field"><label>API Key</label><input type="password" id="cfg-bybit-key"></div>
+                    <div class="field"><label>API Secret</label><input type="password" id="cfg-bybit-secret"></div>
+                    <div class="field"><label>REST URL</label><input id="cfg-bybit-rest"></div>
+                    <div class="field"><label>WebSocket URL</label><input id="cfg-bybit-ws"></div>
+                    <div class="field"><label>Testnet</label><input type="checkbox" id="cfg-bybit-testnet"></div>
+                </div>
+            </div>
+            <div class="settings-section">
+                <h3 onclick="toggleSection(this)">Exchanges &mdash; OKX</h3>
+                <div class="settings-body">
+                    <div class="field"><label>API Key</label><input type="password" id="cfg-okx-key"></div>
+                    <div class="field"><label>API Secret</label><input type="password" id="cfg-okx-secret"></div>
+                    <div class="field"><label>Passphrase</label><input type="password" id="cfg-okx-pass"></div>
+                    <div class="field"><label>REST URL</label><input id="cfg-okx-rest"></div>
+                    <div class="field"><label>WebSocket URL</label><input id="cfg-okx-ws"></div>
+                    <div class="field"><label>Testnet</label><input type="checkbox" id="cfg-okx-testnet"></div>
+                </div>
+            </div>
+            <div class="settings-section">
+                <h3 onclick="toggleSection(this)">Exchanges &mdash; Kraken</h3>
+                <div class="settings-body">
+                    <div class="field"><label>API Key</label><input type="password" id="cfg-kraken-key"></div>
+                    <div class="field"><label>API Secret</label><input type="password" id="cfg-kraken-secret"></div>
+                    <div class="field"><label>REST URL</label><input id="cfg-kraken-rest"></div>
+                    <div class="field"><label>WebSocket URL</label><input id="cfg-kraken-ws"></div>
+                    <div class="field"><label>Testnet</label><input type="checkbox" id="cfg-kraken-testnet"></div>
+                </div>
+            </div>
+            <div class="settings-section">
+                <h3 onclick="toggleSection(this)">Trading</h3>
+                <div class="settings-body open">
+                    <div class="field"><label>Symbols (comma-sep)</label><input id="cfg-symbols"></div>
+                    <div class="field"><label>Default Leverage</label><input type="number" id="cfg-def-lev" min="1" max="125"></div>
+                    <div class="field"><label>Max Leverage</label><input type="number" id="cfg-max-lev" min="1" max="125"></div>
+                </div>
+            </div>
+            <div class="settings-section">
+                <h3 onclick="toggleSection(this)">Risk Management</h3>
+                <div class="settings-body open">
+                    <div class="field"><label>Max Risk/Trade (%)</label><input type="number" id="cfg-risk-pct" step="0.1"></div>
+                    <div class="field"><label>Max Daily Loss (%)</label><input type="number" id="cfg-daily-loss" step="0.1"></div>
+                    <div class="field"><label>Max Drawdown (%)</label><input type="number" id="cfg-drawdown" step="0.1"></div>
+                    <div class="field"><label>Max Consecutive Losses</label><input type="number" id="cfg-consec" min="1"></div>
+                    <div class="field"><label>Cooldown (minutes)</label><input type="number" id="cfg-cooldown" min="1"></div>
+                    <div class="field"><label>Min Equity ($)</label><input type="number" id="cfg-min-eq" step="1"></div>
+                    <div class="field"><label>Max Open Positions</label><input type="number" id="cfg-max-pos" min="1"></div>
+                    <div class="field"><label>Max Trades/Hour</label><input type="number" id="cfg-max-tph" min="1"></div>
+                    <div class="field"><label>Max Leverage</label><input type="number" id="cfg-risk-lev" min="1" max="125"></div>
+                </div>
+            </div>
+            <div class="settings-section">
+                <h3 onclick="toggleSection(this)">Strategy &mdash; Ensemble</h3>
+                <div class="settings-body open">
+                    <div class="field"><label>Ensemble Threshold</label><input type="number" id="cfg-ens-thresh" step="0.01" min="0" max="1"></div>
+                </div>
+            </div>
+            <div class="settings-section">
+                <h3 onclick="toggleSection(this)">Strategy &mdash; Momentum Breakout</h3>
+                <div class="settings-body">
+                    <div class="field"><label>Enabled</label><input type="checkbox" id="cfg-mom-on"></div>
+                    <div class="field"><label>Weight</label><input type="number" id="cfg-mom-w" step="0.01" min="0" max="1"></div>
+                    <div class="field"><label>Volume Spike Multiplier</label><input type="number" id="cfg-mom-vol" step="0.1"></div>
+                    <div class="field"><label>Take Profit (%)</label><input type="number" id="cfg-mom-tp" step="0.01"></div>
+                    <div class="field"><label>Stop Loss (%)</label><input type="number" id="cfg-mom-sl" step="0.01"></div>
+                    <div class="field"><label>Trailing Stop (%)</label><input type="number" id="cfg-mom-trail" step="0.01"></div>
+                    <div class="field"><label>RSI Overbought</label><input type="number" id="cfg-mom-rsih" step="1"></div>
+                    <div class="field"><label>RSI Oversold</label><input type="number" id="cfg-mom-rsil" step="1"></div>
+                </div>
+            </div>
+            <div class="settings-section">
+                <h3 onclick="toggleSection(this)">Strategy &mdash; Order Book Imbalance</h3>
+                <div class="settings-body">
+                    <div class="field"><label>Enabled</label><input type="checkbox" id="cfg-ob-on"></div>
+                    <div class="field"><label>Weight</label><input type="number" id="cfg-ob-w" step="0.01" min="0" max="1"></div>
+                    <div class="field"><label>Imbalance Threshold</label><input type="number" id="cfg-ob-thresh" step="0.01"></div>
+                    <div class="field"><label>Take Profit (ticks)</label><input type="number" id="cfg-ob-tp" min="1"></div>
+                    <div class="field"><label>Stop Loss (ticks)</label><input type="number" id="cfg-ob-sl" min="1"></div>
+                </div>
+            </div>
+            <div class="settings-section">
+                <h3 onclick="toggleSection(this)">Strategy &mdash; Liquidation Wick</h3>
+                <div class="settings-body">
+                    <div class="field"><label>Enabled</label><input type="checkbox" id="cfg-liq-on"></div>
+                    <div class="field"><label>Weight</label><input type="number" id="cfg-liq-w" step="0.01" min="0" max="1"></div>
+                    <div class="field"><label>Price Velocity Threshold</label><input type="number" id="cfg-liq-vel" step="0.1"></div>
+                    <div class="field"><label>Volume Spike Multiplier</label><input type="number" id="cfg-liq-vol" step="0.1"></div>
+                    <div class="field"><label>Take Profit (%)</label><input type="number" id="cfg-liq-tp" step="0.01"></div>
+                    <div class="field"><label>Stop Loss (%)</label><input type="number" id="cfg-liq-sl" step="0.01"></div>
+                </div>
+            </div>
+            <div class="settings-section">
+                <h3 onclick="toggleSection(this)">Strategy &mdash; Funding Rate Bias</h3>
+                <div class="settings-body">
+                    <div class="field"><label>Enabled</label><input type="checkbox" id="cfg-fund-on"></div>
+                    <div class="field"><label>Weight</label><input type="number" id="cfg-fund-w" step="0.01" min="0" max="1"></div>
+                    <div class="field"><label>Funding Threshold</label><input type="number" id="cfg-fund-thresh" step="0.001"></div>
+                    <div class="field"><label>Strength Boost</label><input type="number" id="cfg-fund-boost" step="0.01"></div>
+                </div>
+            </div>
+            <div class="save-bar">
+                <button class="btn btn-primary" onclick="saveConfig()">Save Configuration</button>
+                <button class="btn" onclick="loadConfig()">Reload</button>
+                <span id="saveToast"></span>
+            </div>
+            <p style="color:#8b949e;font-size:0.78em;margin-top:10px;">Changes are saved to config/default.toml. Some changes require a restart to take full effect.</p>
+        </div>
+    </div>
+
+    <!-- Trade Logic Tab -->
+    <div class="tab-content" id="tab-tradelogic">
+        <div class="logic-wrap">
+            <div class="logic-card">
+                <h3>Ensemble Voting System</h3>
+                <p>Signals are generated by an ensemble of 4 strategies. A trade is only placed when:</p>
+                <ul>
+                    <li>At least <code>2 strategies</code> agree on direction (Buy or Sell)</li>
+                    <li>The weighted average signal strength exceeds the <code>ensemble_threshold</code> (default 0.20)</li>
+                    <li>Take-profit and stop-loss are taken from the highest-weight contributing strategy</li>
+                </ul>
+                <h4>Regime-Adaptive Weights</h4>
+                <p>Strategy weights automatically adjust based on the detected volatility regime:</p>
+                <table class="regime-tbl">
+                    <thead><tr><th>Regime</th><th>Momentum</th><th>OB Imbalance</th><th>Liq Wick</th><th>Funding</th></tr></thead>
+                    <tbody>
+                        <tr><td>Volatile</td><td>50%</td><td>10%</td><td>30%</td><td>10%</td></tr>
+                        <tr><td>Normal</td><td>40%</td><td>25%</td><td>20%</td><td>15%</td></tr>
+                        <tr><td>Ranging</td><td>20%</td><td>40%</td><td>25%</td><td>15%</td></tr>
+                        <tr><td style="color:#f85149">Extreme</td><td colspan="4" style="color:#f85149">All strategies PAUSED</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="logic-card">
+                <h3>Strategy 1: Momentum Breakout (40% weight)</h3>
+                <p>The primary strategy. Detects breakouts with volume confirmation and multi-indicator confluence.</p>
+                <h4>Long Entry Conditions</h4>
+                <ul>
+                    <li>Price breaks above 60-second high: <code>price &gt; highest_high_60s</code></li>
+                    <li>Volume spike: <code>current_volume / avg_volume_60s &ge; 2.5x</code></li>
+                    <li>RSI not overbought: <code>RSI(14) &lt; 80</code></li>
+                    <li>OBV confirms accumulation: <code>OBV &ge; 0</code></li>
+                    <li>EMA trend alignment: <code>EMA(9) &gt; EMA(21)</code></li>
+                    <li>Multi-timeframe: 5m and 15m trends not Down</li>
+                </ul>
+                <h4>Short Entry Conditions</h4>
+                <ul>
+                    <li>Price breaks below 60-second low: <code>price &lt; lowest_low_60s</code></li>
+                    <li>Same volume spike, RSI &gt; 20, OBV &le; 0, EMA(9) &lt; EMA(21)</li>
+                </ul>
+                <h4>Exits</h4>
+                <p>Take Profit: <code>0.50%</code> &nbsp;|&nbsp; Stop Loss: <code>0.25%</code> (2:1 R:R) &nbsp;|&nbsp; Trailing Stop: <code>0.20%</code></p>
+            </div>
+
+            <div class="logic-card">
+                <h3>Strategy 2: Order Book Imbalance (25% weight)</h3>
+                <p>Captures short-term microstructure edges using order book depth analysis. Uses PostOnly orders exclusively for maker rebates.</p>
+                <h4>Entry Conditions</h4>
+                <ul>
+                    <li>Spread guard: <code>spread &le; 2x tick_size</code></li>
+                    <li>Long: <code>imbalance_ratio &gt; 0.30</code> AND <code>CVD &gt; 0</code> (buying pressure)</li>
+                    <li>Short: <code>imbalance_ratio &lt; -0.30</code> AND <code>CVD &lt; 0</code> (selling pressure)</li>
+                </ul>
+                <h4>Exits</h4>
+                <p>Take Profit: <code>3 ticks</code> &nbsp;|&nbsp; Stop Loss: <code>2 ticks</code></p>
+            </div>
+
+            <div class="logic-card">
+                <h3>Strategy 3: Liquidation Wick Reversal (20% weight)</h3>
+                <p>Detects liquidation cascades and trades the reversal after exhaustion. High conviction, low frequency (1-3 trades/day).</p>
+                <h4>Entry Conditions</h4>
+                <ul>
+                    <li>Liquidation volume spike: <code>liq_volume &ge; 3.0x avg_volume_60s</code></li>
+                    <li>Long (after downward cascade): <code>price_velocity_30s &lt; -1.0%</code></li>
+                    <li>Short (after upward cascade): <code>price_velocity_30s &gt; +1.0%</code></li>
+                </ul>
+                <h4>Exits</h4>
+                <p>Take Profit: <code>0.80%</code> &nbsp;|&nbsp; Stop Loss: <code>0.40%</code> (2:1 R:R)</p>
+            </div>
+
+            <div class="logic-card">
+                <h3>Strategy 4: Funding Rate Bias (15% weight)</h3>
+                <p>Supplementary strategy &mdash; does NOT generate standalone signals. Adds directional bias when funding rates are extreme.</p>
+                <ul>
+                    <li>Short bias when <code>funding_rate &gt; 0.05</code> (5%)</li>
+                    <li>Long bias when <code>funding_rate &lt; -0.05</code></li>
+                    <li>Cross-exchange divergence: <code>|primary - secondary| &gt; 0.025</code></li>
+                    <li>Boosts ensemble signal strength by <code>+0.10</code></li>
+                </ul>
+            </div>
+
+            <div class="logic-card">
+                <h3>Circuit Breaker Rules</h3>
+                <p>Trading is automatically halted when any of these conditions are met:</p>
+                <table class="regime-tbl">
+                    <thead><tr><th>Condition</th><th>Paper Mode</th><th>Live Mode</th></tr></thead>
+                    <tbody>
+                        <tr><td>Consecutive Losses</td><td>&ge; 3</td><td>&ge; 2</td></tr>
+                        <tr><td>Daily Loss</td><td>&ge; 10%</td><td>&ge; 7%</td></tr>
+                        <tr><td>Peak Drawdown</td><td>&ge; 25%</td><td>&ge; 20%</td></tr>
+                        <tr><td>Min Equity Floor</td><td>$25</td><td>$25</td></tr>
+                        <tr><td>Trades per Hour</td><td>&ge; 15</td><td>&ge; 10</td></tr>
+                        <tr><td>Cooldown Duration</td><td>15 min</td><td>30 min</td></tr>
+                    </tbody>
+                </table>
+                <p style="margin-top:8px;">Extreme volatility regime pauses all strategies regardless of other conditions.</p>
+            </div>
+        </div>
+    </div>
+
+<script>
+/* ── Chart ── */
+const ctx = document.getElementById('equityChart').getContext('2d');
+const eqData = {
+    labels: [],
+    datasets: [{
+        label: 'Equity', data: [],
+        borderColor: '#58a6ff', backgroundColor: 'rgba(88,166,255,0.08)',
+        fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2
+    }]
+};
+const chart = new Chart(ctx, {
+    type: 'line', data: eqData,
+    options: {
+        responsive: true, maintainAspectRatio: false,
+        scales: {
+            x: { ticks: { color:'#484f58', maxTicksLimit:12, font:{size:10} }, grid: { color:'#21262d' } },
+            y: { ticks: { color:'#484f58', callback: v=>'$'+v.toFixed(2), font:{size:10} }, grid: { color:'#21262d' } }
+        },
+        plugins: { legend: { display: false } },
+        animation: { duration: 0 }
+    }
+});
+
+const MAX_PTS = 600;
+const pnlCls = v => v >= 0 ? 'pos' : 'neg';
+const fmt$ = v => (v >= 0 ? '+' : '') + '$' + v.toFixed(2);
+
+/* ── Tabs ── */
+function switchTab(name) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(p => p.classList.remove('active'));
+    document.getElementById('tab-'+name).classList.add('active');
+    document.querySelector(`[onclick="switchTab('${name}')"]`).classList.add('active');
+    if (name === 'settings' && !configLoaded) loadConfig();
+}
+
+function toggleSection(el) {
+    el.nextElementSibling.classList.toggle('open');
+}
+
+/* ── WebSocket + Live Update ── */
+let warmupFaded = false;
+
+function updateUI(d) {
+    // Header
+    const m = document.getElementById('mode');
+    m.textContent = d.mode.toUpperCase();
+    m.className = 'mode ' + d.mode;
+    const mins = Math.floor(d.uptime_secs / 60);
+    const hrs = Math.floor(mins / 60);
+    document.getElementById('uptime').textContent =
+        hrs > 0 ? hrs+'h '+(mins%60)+'m' : mins+'m '+(d.uptime_secs%60)+'s';
+
+    // Warmup
+    const wb = document.getElementById('warmupBanner');
+    if (d.warmup_ready) {
+        if (!warmupFaded) {
+            wb.className = 'warmup-banner ready';
+            document.getElementById('warmupTitle').textContent = 'System Ready';
+            document.getElementById('indProg').style.width = '100%';
+            document.getElementById('indProg').className = 'prog-fill done';
+            document.getElementById('regProg').style.width = '100%';
+            document.getElementById('regProg').className = 'prog-fill done';
+            document.getElementById('indVal').textContent = d.indicators_total+'/'+d.indicators_total;
+            document.getElementById('regVal').textContent = d.regime_atr_needed+'/'+d.regime_atr_needed;
+            warmupFaded = true;
+            setTimeout(() => { wb.style.display = 'none'; }, 5000);
+        }
+    } else {
+        const iPct = Math.round((d.indicators_ready / d.indicators_total) * 100);
+        const rPct = Math.min(100, Math.round((d.regime_atr_count / d.regime_atr_needed) * 100));
+        document.getElementById('indProg').style.width = iPct+'%';
+        document.getElementById('indVal').textContent = d.indicators_ready+'/'+d.indicators_total;
+        document.getElementById('regProg').style.width = rPct+'%';
+        document.getElementById('regVal').textContent = d.regime_atr_count+'/'+d.regime_atr_needed;
+    }
+
+    // Equity
+    document.getElementById('equity').textContent = '$' + d.equity.toFixed(2);
+    document.getElementById('equity').className = 'big-num ' + pnlCls(d.equity - d.starting_equity);
+    const dp = document.getElementById('dailyPnl');
+    dp.textContent = fmt$(d.daily_pnl); dp.className = pnlCls(d.daily_pnl);
+    const tp = document.getElementById('totalPnl');
+    tp.textContent = fmt$(d.total_pnl); tp.className = pnlCls(d.total_pnl);
+    const dd = document.getElementById('drawdown');
+    dd.textContent = d.drawdown_pct.toFixed(2) + '%';
+    dd.className = d.drawdown_pct > 5 ? 'neg' : '';
+    document.getElementById('fees').textContent = '$' + d.total_fees.toFixed(2);
+
+    // Performance
+    document.getElementById('totalTrades').textContent = d.total_trades;
+    document.getElementById('winRate').textContent = (d.win_rate * 100).toFixed(1) + '%';
+    document.getElementById('profitFactor').textContent =
+        d.profit_factor > 9999 ? '\u221e' : d.profit_factor.toFixed(2);
+    const ex = document.getElementById('expectancy');
+    ex.textContent = fmt$(d.expectancy); ex.className = pnlCls(d.expectancy);
+
+    // Risk
+    const ct = document.getElementById('canTrade');
+    ct.textContent = d.can_trade ? 'ACTIVE' : 'HALTED';
+    ct.className = 'badge ' + (d.can_trade ? 'ok' : 'halt');
+    document.getElementById('consecLosses').textContent = d.consecutive_losses;
+    document.getElementById('tradesHour').textContent = d.trades_this_hour;
+    document.getElementById('dailyLoss').textContent = '$' + d.daily_loss.toFixed(2);
+    const rg = document.getElementById('regime');
+    rg.textContent = d.regime;
+    rg.className = 'badge ' + (d.regime==='Normal'?'ok': d.regime==='Extreme'?'halt':'warn');
+
+    // Chart
+    const t = new Date(d.timestamp_ms).toLocaleTimeString();
+    eqData.labels.push(t);
+    eqData.datasets[0].data.push(d.equity);
+    if (eqData.labels.length > MAX_PTS) { eqData.labels.shift(); eqData.datasets[0].data.shift(); }
+    chart.update();
+
+    // Orders
+    const ob = document.getElementById('ordersBody');
+    const no = document.getElementById('noOrders');
+    if (d.open_orders.length === 0) { ob.innerHTML=''; no.style.display='block'; }
+    else {
+        no.style.display='none';
+        ob.innerHTML = d.open_orders.map(o =>
+            `<tr><td>${o.order_id.slice(0,12)}</td><td>${o.symbol}</td>`+
+            `<td class="${o.side==='Buy'?'pos':'neg'}">${o.side}</td>`+
+            `<td>${o.price}</td><td>${o.quantity}</td><td>${o.filled_qty}</td>`+
+            `<td>${o.status}</td></tr>`
+        ).join('');
+    }
+
+    // Markets
+    const mb = document.getElementById('marketsBody');
+    const nm = document.getElementById('noMarkets');
+    if (d.markets.length === 0) { mb.innerHTML=''; nm.style.display='block'; }
+    else {
+        nm.style.display='none';
+        mb.innerHTML = d.markets.map(m =>
+            `<tr><td>${m.symbol}</td><td>${m.best_bid}</td><td>${m.best_ask}</td><td>${m.spread}</td></tr>`
+        ).join('');
+    }
+}
+
+function connect() {
+    const ws = new WebSocket('ws://' + location.host + '/ws');
+    const dot = document.getElementById('wsDot');
+    const lbl = document.getElementById('wsLabel');
+    ws.onopen = () => { dot.className='status-dot ok'; lbl.textContent='Connected'; };
+    ws.onclose = () => { dot.className='status-dot off'; lbl.textContent='Reconnecting...'; setTimeout(connect, 2000); };
+    ws.onerror = () => ws.close();
+    ws.onmessage = e => { try { updateUI(JSON.parse(e.data)); } catch(err) { console.error(err); } };
+}
+connect();
+
+/* ── Settings ── */
+let configLoaded = false;
+
+function loadConfig() {
+    fetch('/api/config').then(r=>r.json()).then(cfg => {
+        configLoaded = true;
+        const v = (id, val) => { const el = document.getElementById(id); if(el) el.value = val ?? ''; };
+        const c = (id, val) => { const el = document.getElementById(id); if(el) el.checked = !!val; };
+        v('cfg-mode', cfg.general.mode);
+        if(cfg.exchanges.binance) { v('cfg-binance-key',cfg.exchanges.binance.api_key); v('cfg-binance-secret',cfg.exchanges.binance.api_secret); v('cfg-binance-rest',cfg.exchanges.binance.base_url_rest); v('cfg-binance-ws',cfg.exchanges.binance.base_url_ws); c('cfg-binance-testnet',cfg.exchanges.binance.testnet); }
+        if(cfg.exchanges.bybit) { v('cfg-bybit-key',cfg.exchanges.bybit.api_key); v('cfg-bybit-secret',cfg.exchanges.bybit.api_secret); v('cfg-bybit-rest',cfg.exchanges.bybit.base_url_rest); v('cfg-bybit-ws',cfg.exchanges.bybit.base_url_ws); c('cfg-bybit-testnet',cfg.exchanges.bybit.testnet); }
+        if(cfg.exchanges.okx) { v('cfg-okx-key',cfg.exchanges.okx.api_key); v('cfg-okx-secret',cfg.exchanges.okx.api_secret); v('cfg-okx-pass',cfg.exchanges.okx.passphrase); v('cfg-okx-rest',cfg.exchanges.okx.base_url_rest); v('cfg-okx-ws',cfg.exchanges.okx.base_url_ws); c('cfg-okx-testnet',cfg.exchanges.okx.testnet); }
+        if(cfg.exchanges.kraken) { v('cfg-kraken-key',cfg.exchanges.kraken.api_key); v('cfg-kraken-secret',cfg.exchanges.kraken.api_secret); v('cfg-kraken-rest',cfg.exchanges.kraken.base_url_rest); v('cfg-kraken-ws',cfg.exchanges.kraken.base_url_ws); c('cfg-kraken-testnet',cfg.exchanges.kraken.testnet); }
+        v('cfg-symbols', cfg.trading.symbols.join(', '));
+        v('cfg-def-lev', cfg.trading.default_leverage);
+        v('cfg-max-lev', cfg.trading.max_leverage);
+        v('cfg-risk-pct', cfg.risk.max_risk_per_trade_pct);
+        v('cfg-daily-loss', cfg.risk.max_daily_loss_pct);
+        v('cfg-drawdown', cfg.risk.max_drawdown_pct);
+        v('cfg-consec', cfg.risk.max_consecutive_losses);
+        v('cfg-cooldown', cfg.risk.cooldown_minutes);
+        v('cfg-min-eq', cfg.risk.min_equity);
+        v('cfg-max-pos', cfg.risk.max_open_positions);
+        v('cfg-max-tph', cfg.risk.max_trades_per_hour);
+        v('cfg-risk-lev', cfg.risk.max_leverage);
+        v('cfg-ens-thresh', cfg.strategy.ensemble_threshold);
+        c('cfg-mom-on', cfg.strategy.momentum.enabled); v('cfg-mom-w',cfg.strategy.momentum.weight); v('cfg-mom-vol',cfg.strategy.momentum.volume_spike_multiplier); v('cfg-mom-tp',cfg.strategy.momentum.take_profit_pct); v('cfg-mom-sl',cfg.strategy.momentum.stop_loss_pct); v('cfg-mom-trail',cfg.strategy.momentum.trailing_stop_pct); v('cfg-mom-rsih',cfg.strategy.momentum.rsi_overbought); v('cfg-mom-rsil',cfg.strategy.momentum.rsi_oversold);
+        c('cfg-ob-on', cfg.strategy.ob_imbalance.enabled); v('cfg-ob-w',cfg.strategy.ob_imbalance.weight); v('cfg-ob-thresh',cfg.strategy.ob_imbalance.imbalance_threshold); v('cfg-ob-tp',cfg.strategy.ob_imbalance.take_profit_ticks); v('cfg-ob-sl',cfg.strategy.ob_imbalance.stop_loss_ticks);
+        c('cfg-liq-on', cfg.strategy.liquidation_wick.enabled); v('cfg-liq-w',cfg.strategy.liquidation_wick.weight); v('cfg-liq-vel',cfg.strategy.liquidation_wick.price_velocity_threshold); v('cfg-liq-vol',cfg.strategy.liquidation_wick.volume_spike_multiplier); v('cfg-liq-tp',cfg.strategy.liquidation_wick.take_profit_pct); v('cfg-liq-sl',cfg.strategy.liquidation_wick.stop_loss_pct);
+        c('cfg-fund-on', cfg.strategy.funding_bias.enabled); v('cfg-fund-w',cfg.strategy.funding_bias.weight); v('cfg-fund-thresh',cfg.strategy.funding_bias.funding_threshold); v('cfg-fund-boost',cfg.strategy.funding_bias.strength_boost);
+        showToast('Config loaded', 'ok');
+    }).catch(e => showToast('Failed to load: '+e, 'err'));
+}
+
+function saveConfig() {
+    const g = id => document.getElementById(id)?.value ?? '';
+    const gn = id => parseFloat(g(id)) || 0;
+    const gi = id => parseInt(g(id)) || 0;
+    const gc = id => document.getElementById(id)?.checked ?? false;
+    const exch = (prefix) => ({
+        api_key: g('cfg-'+prefix+'-key'), api_secret: g('cfg-'+prefix+'-secret'),
+        base_url_rest: g('cfg-'+prefix+'-rest'), base_url_ws: g('cfg-'+prefix+'-ws'),
+        testnet: gc('cfg-'+prefix+'-testnet'), symbol_map: {}
+    });
+    const cfg = {
+        general: { mode: g('cfg-mode') },
+        exchanges: {
+            binance: exch('binance'), bybit: exch('bybit'),
+            okx: { ...exch('okx'), passphrase: g('cfg-okx-pass') },
+            kraken: exch('kraken')
+        },
+        trading: { symbols: g('cfg-symbols').split(',').map(s=>s.trim()).filter(Boolean), default_leverage: gi('cfg-def-lev'), max_leverage: gi('cfg-max-lev') },
+        risk: { max_risk_per_trade_pct:gn('cfg-risk-pct'), max_daily_loss_pct:gn('cfg-daily-loss'), max_drawdown_pct:gn('cfg-drawdown'), max_consecutive_losses:gi('cfg-consec'), cooldown_minutes:gi('cfg-cooldown'), min_equity:gn('cfg-min-eq'), max_open_positions:gi('cfg-max-pos'), max_trades_per_hour:gi('cfg-max-tph'), max_leverage:gi('cfg-risk-lev') },
+        strategy: {
+            ensemble_threshold: gn('cfg-ens-thresh'),
+            momentum: { enabled:gc('cfg-mom-on'), weight:gn('cfg-mom-w'), volume_spike_multiplier:gn('cfg-mom-vol'), take_profit_pct:gn('cfg-mom-tp'), stop_loss_pct:gn('cfg-mom-sl'), trailing_stop_pct:gn('cfg-mom-trail'), rsi_overbought:gn('cfg-mom-rsih'), rsi_oversold:gn('cfg-mom-rsil') },
+            ob_imbalance: { enabled:gc('cfg-ob-on'), weight:gn('cfg-ob-w'), imbalance_threshold:gn('cfg-ob-thresh'), take_profit_ticks:gi('cfg-ob-tp'), stop_loss_ticks:gi('cfg-ob-sl') },
+            liquidation_wick: { enabled:gc('cfg-liq-on'), weight:gn('cfg-liq-w'), price_velocity_threshold:gn('cfg-liq-vel'), volume_spike_multiplier:gn('cfg-liq-vol'), take_profit_pct:gn('cfg-liq-tp'), stop_loss_pct:gn('cfg-liq-sl') },
+            funding_bias: { enabled:gc('cfg-fund-on'), weight:gn('cfg-fund-w'), funding_threshold:gn('cfg-fund-thresh'), strength_boost:gn('cfg-fund-boost') }
+        }
+    };
+    fetch('/api/config', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(cfg) })
+        .then(r=>r.text()).then(msg => showToast(msg, 'ok'))
+        .catch(e => showToast('Save failed: '+e, 'err'));
+}
+
+function showToast(msg, cls) {
+    const el = document.getElementById('saveToast');
+    el.textContent = msg; el.className = 'toast '+cls;
+    setTimeout(() => { el.textContent=''; el.className=''; }, 4000);
+}
+</script>
+</body>
+</html>
