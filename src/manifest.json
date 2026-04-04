@@ -1,0 +1,18 @@
+{
+  "name": "Crypto Scalper Dashboard",
+  "short_name": "Scalper",
+  "description": "Ultra-low-latency crypto futures scalping bot",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "theme_color": "#0d1117",
+  "background_color": "#0d1117",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

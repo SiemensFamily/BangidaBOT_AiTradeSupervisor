@@ -4,6 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Crypto Scalper Dashboard</title>
+    <meta name="theme-color" content="#0d1117">
+    <meta name="description" content="Crypto Scalper Trading Bot Dashboard">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/icon.svg">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
@@ -647,6 +652,10 @@ function showToast(msg, cls) {
     const el = document.getElementById('saveToast');
     el.textContent = msg; el.className = 'toast '+cls;
     setTimeout(() => { el.textContent=''; el.className=''; }, 4000);
+}
+
+if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
 </script>
 </body>

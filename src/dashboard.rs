@@ -112,6 +112,11 @@ struct MarketSnap {
 // ── HTML ───────────────────────────────────────────────────────────────────
 
 const HTML: &str = include_str!("dashboard.html");
+const MANIFEST: &str = include_str!("manifest.json");
+
+const ICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="64" fill="#0d1117"/><path d="M128 384V192l128-64 128 64v192l-128 64z" fill="none" stroke="#58a6ff" stroke-width="24" stroke-linejoin="round"/><path d="M256 128v320M128 192l128 64 128-64" fill="none" stroke="#58a6ff" stroke-width="16" stroke-linejoin="round"/><circle cx="256" cy="256" r="20" fill="#2ea043"/></svg>"##;
+
+const SW_JS: &str = "self.addEventListener('fetch', e => e.respondWith(fetch(e.request)));";
 
 // ── Server ─────────────────────────────────────────────────────────────────
 
@@ -135,6 +140,9 @@ pub async fn start_dashboard(state: DashboardState) {
     let app = Router::new()
         .route("/", get(serve_html))
         .route("/ws", get(ws_handler))
+        .route("/manifest.json", get(serve_manifest))
+        .route("/icon.svg", get(serve_icon))
+        .route("/sw.js", get(serve_sw))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/trades.csv", get(get_trades_csv))
         .with_state(state);
@@ -146,6 +154,18 @@ pub async fn start_dashboard(state: DashboardState) {
 
 async fn serve_html() -> Html<&'static str> {
     Html(HTML)
+}
+
+async fn serve_manifest() -> ([(header::HeaderName, &'static str); 1], &'static str) {
+    ([(header::CONTENT_TYPE, "application/manifest+json")], MANIFEST)
+}
+
+async fn serve_icon() -> ([(header::HeaderName, &'static str); 1], &'static str) {
+    ([(header::CONTENT_TYPE, "image/svg+xml")], ICON_SVG)
+}
+
+async fn serve_sw() -> ([(header::HeaderName, &'static str); 1], &'static str) {
+    ([(header::CONTENT_TYPE, "application/javascript")], SW_JS)
 }
 
 // ── WebSocket ──────────────────────────────────────────────────────────────
