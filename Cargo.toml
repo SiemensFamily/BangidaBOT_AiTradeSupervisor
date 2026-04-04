@@ -1,6 +1,5 @@
 [workspace]
 resolver = "2"
-exclude = ["crates/scalper-desktop"]
 members = [
     "crates/scalper-core",
     "crates/scalper-data",
@@ -9,6 +8,7 @@ members = [
     "crates/scalper-risk",
     "crates/scalper-execution",
     "crates/scalper-backtest",
+    "crates/scalper-desktop",
 ]
 
 [package]
