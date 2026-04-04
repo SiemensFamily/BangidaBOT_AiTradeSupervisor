@@ -37,7 +37,7 @@
         .badge.halt { background:#f8514922; color:#f85149; }
 
         .chart-card { grid-column: 1 / -1; }
-        #equityChart { width:100%; height:220px; }
+        .chart-wrap { position:relative; width:100%; height:220px; }
 
         table { width:100%; border-collapse:collapse; font-size:0.82em; }
         th { text-align:left; color:#8b949e; padding:6px 8px; border-bottom:1px solid #30363d; font-weight:500; }
@@ -100,7 +100,7 @@
         <!-- Equity Curve -->
         <div class="card chart-card">
             <h3>Equity Curve</h3>
-            <canvas id="equityChart"></canvas>
+            <div class="chart-wrap"><canvas id="equityChart"></canvas></div>
         </div>
 
         <!-- Open Orders -->
