@@ -56,6 +56,11 @@ impl RegimeDetector {
     pub fn is_ready(&self) -> bool {
         self.atr_short.is_ready() && self.atr_long.is_ready()
     }
+
+    /// Number of ATR values computed so far (regime ready at ~50).
+    pub fn atr_count(&self) -> usize {
+        self.atr_count
+    }
 }
 
 impl Default for RegimeDetector {

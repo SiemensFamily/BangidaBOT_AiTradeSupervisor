@@ -270,6 +270,11 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Shared config + trade history for dashboard
+    let shared_config = Arc::new(tokio::sync::RwLock::new(config.clone()));
+    let trade_history: Arc<Mutex<Vec<dashboard::TradeRecord>>> =
+        Arc::new(Mutex::new(Vec::new()));
+
     // Task h: Web dashboard
     {
         let (ws_tx, _) = broadcast::channel::<String>(64);
@@ -281,6 +286,9 @@ async fn main() -> Result<()> {
             order_tracker: order_tracker.clone(),
             orderbooks: orderbooks.clone(),
             regime_detector: regime_detector.clone(),
+            indicators: indicators.clone(),
+            config: shared_config,
+            trade_history,
             ws_tx,
         };
         tokio::spawn(dashboard::start_dashboard(dash_state));
@@ -409,7 +417,7 @@ fn spawn_exchange_feeds(config: &ScalperConfig, market_tx: broadcast::Sender<Mar
 }
 
 /// Per-symbol indicator state.
-struct IndicatorState {
+pub(crate) struct IndicatorState {
     rsi: Option<RSI>,
     ema_9: Option<EMA>,
     ema_21: Option<EMA>,
@@ -434,6 +442,21 @@ impl IndicatorState {
             obv: Some(OBV::new()),
             last_close: None,
         }
+    }
+
+    /// Returns (ready_count, total_count) for warmup progress.
+    pub fn readiness(&self) -> (u32, u32) {
+        let mut ready = 0u32;
+        let total = 8u32;
+        if self.rsi.as_ref().map_or(false, |i| i.is_ready()) { ready += 1; }
+        if self.ema_9.as_ref().map_or(false, |i| i.is_ready()) { ready += 1; }
+        if self.ema_21.as_ref().map_or(false, |i| i.is_ready()) { ready += 1; }
+        if self.macd.as_ref().map_or(false, |i| i.is_ready()) { ready += 1; }
+        if self.bb.as_ref().map_or(false, |i| i.is_ready()) { ready += 1; }
+        if self.vwap.as_ref().map_or(false, |i| i.is_ready()) { ready += 1; }
+        if self.atr.as_ref().map_or(false, |i| i.is_ready()) { ready += 1; }
+        if self.obv.as_ref().map_or(false, |i| i.is_ready()) { ready += 1; }
+        (ready, total)
     }
 
     fn update_price(&mut self, price: f64) {

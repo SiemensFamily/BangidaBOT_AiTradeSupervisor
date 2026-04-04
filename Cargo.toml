@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["crates/scalper-desktop"]
 members = [
     "crates/scalper-core",
     "crates/scalper-data",
@@ -41,6 +42,7 @@ rust_decimal = { version = "1", features = ["serde-with-str"] }
 rust_decimal_macros = "1"
 chrono = { version = "0.4", features = ["serde"] }
 axum = { version = "0.8", features = ["ws"] }
+toml = "0.8"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

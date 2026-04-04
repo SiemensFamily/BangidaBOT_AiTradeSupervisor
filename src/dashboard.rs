@@ -3,22 +3,41 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
+    http::header,
     response::{Html, IntoResponse},
     routing::get,
-    Router,
+    Json, Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::info;
 
+use scalper_core::config::ScalperConfig;
 use scalper_data::orderbook::OrderBook;
 use scalper_data::regime::RegimeDetector;
 use scalper_execution::order_tracker::OrderTracker;
 use scalper_risk::risk_manager::RiskManager;
 
-/// Shared state the dashboard reads from (never mutates).
+use crate::IndicatorState;
+
+// ── Trade history ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TradeRecord {
+    pub timestamp_ms: u64,
+    pub symbol: String,
+    pub side: String,
+    pub price: String,
+    pub quantity: String,
+    pub pnl: f64,
+    pub fees: f64,
+    pub order_id: String,
+}
+
+// ── Shared state ───────────────────────────────────────────────────────────
+
 #[derive(Clone)]
 pub struct DashboardState {
     pub config_mode: String,
@@ -28,31 +47,47 @@ pub struct DashboardState {
     pub order_tracker: Arc<OrderTracker>,
     pub orderbooks: Arc<Mutex<HashMap<String, OrderBook>>>,
     pub regime_detector: Arc<Mutex<RegimeDetector>>,
+    pub indicators: Arc<Mutex<IndicatorState>>,
+    pub config: Arc<RwLock<ScalperConfig>>,
+    pub trade_history: Arc<Mutex<Vec<TradeRecord>>>,
     pub ws_tx: broadcast::Sender<String>,
 }
+
+// ── Snapshot types ─────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
 struct Snapshot {
     timestamp_ms: u64,
     mode: String,
     uptime_secs: u64,
+    // Equity
     equity: f64,
     starting_equity: f64,
     daily_pnl: f64,
     total_pnl: f64,
     total_fees: f64,
     drawdown_pct: f64,
+    // Performance
     win_rate: f64,
     profit_factor: f64,
     total_trades: u64,
     expectancy: f64,
+    // Risk
     can_trade: bool,
     consecutive_losses: u32,
     trades_this_hour: u32,
     daily_loss: f64,
     regime: String,
+    // Data
     open_orders: Vec<OrderSnap>,
     markets: Vec<MarketSnap>,
+    // Warmup
+    warmup_ready: bool,
+    indicators_ready: u32,
+    indicators_total: u32,
+    regime_ready: bool,
+    regime_atr_count: usize,
+    regime_atr_needed: usize,
 }
 
 #[derive(Serialize)]
@@ -74,7 +109,11 @@ struct MarketSnap {
     spread: String,
 }
 
+// ── HTML ───────────────────────────────────────────────────────────────────
+
 const HTML: &str = include_str!("dashboard.html");
+
+// ── Server ─────────────────────────────────────────────────────────────────
 
 pub async fn start_dashboard(state: DashboardState) {
     // Snapshot broadcaster (every 500ms)
@@ -96,6 +135,8 @@ pub async fn start_dashboard(state: DashboardState) {
     let app = Router::new()
         .route("/", get(serve_html))
         .route("/ws", get(ws_handler))
+        .route("/api/config", get(get_config).put(put_config))
+        .route("/api/trades.csv", get(get_trades_csv))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
@@ -107,17 +148,17 @@ async fn serve_html() -> Html<&'static str> {
     Html(HTML)
 }
 
+// ── WebSocket ──────────────────────────────────────────────────────────────
+
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<DashboardState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(socket, state))
 }
 
 async fn handle_ws(mut socket: WebSocket, state: DashboardState) {
-    // Send immediate snapshot on connect
     let snapshot = build_snapshot(&state).await;
     if let Ok(json) = serde_json::to_string(&snapshot) {
         let _ = socket.send(Message::Text(json.into())).await;
     }
-
     let mut rx = state.ws_tx.subscribe();
     while let Ok(msg) = rx.recv().await {
         if socket.send(Message::Text(msg.into())).await.is_err() {
@@ -126,11 +167,60 @@ async fn handle_ws(mut socket: WebSocket, state: DashboardState) {
     }
 }
 
+// ── REST: Config ───────────────────────────────────────────────────────────
+
+async fn get_config(State(state): State<DashboardState>) -> Json<ScalperConfig> {
+    let cfg = state.config.read().await.clone();
+    Json(cfg)
+}
+
+#[derive(Deserialize)]
+struct ConfigUpdate {
+    #[serde(flatten)]
+    config: ScalperConfig,
+}
+
+async fn put_config(
+    State(state): State<DashboardState>,
+    Json(update): Json<ConfigUpdate>,
+) -> impl IntoResponse {
+    // Write to config/default.toml
+    let toml_str = match toml::to_string_pretty(&update.config) {
+        Ok(s) => s,
+        Err(e) => return (axum::http::StatusCode::BAD_REQUEST, e.to_string()),
+    };
+    if let Err(e) = tokio::fs::write("config/default.toml", &toml_str).await {
+        return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+    // Update in-memory config
+    *state.config.write().await = update.config;
+    (axum::http::StatusCode::OK, "Config saved. Restart for full effect.".to_string())
+}
+
+// ── REST: CSV export ───────────────────────────────────────────────────────
+
+async fn get_trades_csv(State(state): State<DashboardState>) -> impl IntoResponse {
+    let trades = state.trade_history.lock().await;
+    let mut csv = String::from("timestamp,symbol,side,price,quantity,pnl,fees,order_id\n");
+    for t in trades.iter() {
+        csv.push_str(&format!(
+            "{},{},{},{},{},{:.4},{:.4},{}\n",
+            t.timestamp_ms, t.symbol, t.side, t.price, t.quantity, t.pnl, t.fees, t.order_id
+        ));
+    }
+    (
+        [(header::CONTENT_TYPE, "text/csv"), (header::CONTENT_DISPOSITION, "attachment; filename=\"trades.csv\"")],
+        csv,
+    )
+}
+
+// ── Snapshot builder ───────────────────────────────────────────────────────
+
 async fn build_snapshot(state: &DashboardState) -> Snapshot {
     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
     let uptime = (now_ms.saturating_sub(state.start_time_ms)) / 1000;
 
-    // Lock risk manager to read PnL + circuit breaker
+    // Risk manager
     let rm = state.risk_manager.lock().await;
     let tracker = rm.pnl_tracker();
     let cb = rm.circuit_breaker();
@@ -150,11 +240,22 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
     let consecutive_losses = cb.consecutive_losses();
     let trades_this_hour = cb.trades_this_hour();
     let daily_loss = cb.daily_loss();
-
-    drop(rm); // Release lock early
+    drop(rm);
 
     // Regime
-    let regime = format!("{:?}", state.regime_detector.lock().await.regime());
+    let rd = state.regime_detector.lock().await;
+    let regime = format!("{:?}", rd.regime());
+    let regime_ready = rd.is_ready();
+    let regime_atr_count = rd.atr_count();
+    drop(rd);
+
+    // Indicators warmup
+    let ind = state.indicators.lock().await;
+    let (indicators_ready, indicators_total) = ind.readiness();
+    drop(ind);
+
+    let warmup_ready = regime_ready && indicators_ready == indicators_total;
+    let regime_atr_needed = 50; // EMA-50 of ATR values
 
     // Open orders
     let open = state.order_tracker.open_orders();
@@ -211,5 +312,11 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
         regime,
         open_orders,
         markets,
+        warmup_ready,
+        indicators_ready,
+        indicators_total,
+        regime_ready,
+        regime_atr_count,
+        regime_atr_needed,
     }
 }
