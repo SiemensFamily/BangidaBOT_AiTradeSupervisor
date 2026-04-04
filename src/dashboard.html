@@ -343,6 +343,7 @@
 // ── State ───────────────────────────────────────────────────────────
 let ws, snap = null, chart = null, autoScroll = true;
 let prevConsoleLen = 0;
+let warmupReadyShown = false, warmupDismissed = false;
 
 // ── Tab switching ───────────────────────────────────────────────────
 document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -407,12 +408,17 @@ function render() {
     document.getElementById('uptime').textContent = 'Uptime: ' + fmtUptime(snap.uptime_secs);
     document.getElementById('feedDot').className = 'conn-dot ' + (snap.markets.length > 0 ? 'on' : 'off');
 
-    // Warmup
+    // Warmup — once ready, show briefly then hide permanently
     const wb = document.getElementById('warmupBanner');
-    if (snap.warmup_ready) {
-        wb.className = 'warmup-banner show ready';
-        document.getElementById('warmupTitle').textContent = 'All systems ready — scanning for trades';
-        setTimeout(() => { wb.className = 'warmup-banner'; }, 8000);
+    if (warmupDismissed) {
+        wb.className = 'warmup-banner';
+    } else if (snap.warmup_ready) {
+        if (!warmupReadyShown) {
+            warmupReadyShown = true;
+            wb.className = 'warmup-banner show ready';
+            document.getElementById('warmupTitle').textContent = 'All systems ready — scanning for trades';
+            setTimeout(() => { warmupDismissed = true; wb.className = 'warmup-banner'; }, 5000);
+        }
     } else {
         wb.className = 'warmup-banner show';
         document.getElementById('warmupTitle').textContent = 'Warming up indicators...';

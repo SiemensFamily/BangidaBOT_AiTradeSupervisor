@@ -110,17 +110,17 @@ async fn main() -> Result<()> {
     // Task a: Spawn exchange WebSocket feeds → market_tx
     {
         let mut cl = console_log.lock().await;
-        if config.exchanges.binance.as_ref().map_or(false, |c| !c.api_key.is_empty()) {
-            cl.push("SUCCESS", "Binance WebSocket feed connecting...".to_string());
+        if config.exchanges.binance.as_ref().map_or(false, |c| !c.base_url_ws.is_empty()) {
+            cl.push("INFO", format!("Binance WebSocket feed connecting → {}", config.exchanges.binance.as_ref().unwrap().base_url_ws));
         }
-        if config.exchanges.bybit.as_ref().map_or(false, |c| !c.api_key.is_empty()) {
-            cl.push("SUCCESS", "Bybit WebSocket feed connecting...".to_string());
+        if config.exchanges.bybit.as_ref().map_or(false, |c| !c.base_url_ws.is_empty()) {
+            cl.push("INFO", format!("Bybit WebSocket feed connecting → {}", config.exchanges.bybit.as_ref().unwrap().base_url_ws));
         }
-        if config.exchanges.okx.as_ref().map_or(false, |c| !c.api_key.is_empty()) {
-            cl.push("SUCCESS", "OKX WebSocket feed connecting...".to_string());
+        if config.exchanges.okx.as_ref().map_or(false, |c| !c.base_url_ws.is_empty()) {
+            cl.push("INFO", format!("OKX WebSocket feed connecting → {}", config.exchanges.okx.as_ref().unwrap().base_url_ws));
         }
-        if config.exchanges.kraken.as_ref().map_or(false, |c| !c.api_key.is_empty()) {
-            cl.push("SUCCESS", "Kraken WebSocket feed connecting...".to_string());
+        if config.exchanges.kraken.as_ref().map_or(false, |c| !c.base_url_ws.is_empty()) {
+            cl.push("INFO", format!("Kraken WebSocket feed connecting → {}", config.exchanges.kraken.as_ref().unwrap().base_url_ws));
         }
     }
     spawn_exchange_feeds(&config, market_tx.clone());
@@ -586,7 +586,7 @@ fn spawn_exchange_feeds(config: &ScalperConfig, market_tx: broadcast::Sender<Mar
     let symbols = config.trading.symbols.clone();
 
     if let Some(ref binance_cfg) = config.exchanges.binance {
-        if !binance_cfg.api_key.is_empty() {
+        if !binance_cfg.base_url_ws.is_empty() {
             let feed = scalper_exchange::binance::BinanceWsFeed::new(binance_cfg.clone());
             let tx = market_tx.clone();
             let syms = map_symbols(&symbols, binance_cfg);
@@ -600,7 +600,7 @@ fn spawn_exchange_feeds(config: &ScalperConfig, market_tx: broadcast::Sender<Mar
     }
 
     if let Some(ref bybit_cfg) = config.exchanges.bybit {
-        if !bybit_cfg.api_key.is_empty() {
+        if !bybit_cfg.base_url_ws.is_empty() {
             let feed = scalper_exchange::bybit::BybitWsFeed::new(bybit_cfg.clone());
             let tx = market_tx.clone();
             let syms = map_symbols(&symbols, bybit_cfg);
@@ -614,7 +614,7 @@ fn spawn_exchange_feeds(config: &ScalperConfig, market_tx: broadcast::Sender<Mar
     }
 
     if let Some(ref okx_cfg) = config.exchanges.okx {
-        if !okx_cfg.api_key.is_empty() {
+        if !okx_cfg.base_url_ws.is_empty() {
             let feed = scalper_exchange::okx::OkxWsFeed::new(okx_cfg.clone());
             let tx = market_tx.clone();
             let syms = symbols.clone(); // OKX uses standard symbols
@@ -628,7 +628,7 @@ fn spawn_exchange_feeds(config: &ScalperConfig, market_tx: broadcast::Sender<Mar
     }
 
     if let Some(ref kraken_cfg) = config.exchanges.kraken {
-        if !kraken_cfg.api_key.is_empty() {
+        if !kraken_cfg.base_url_ws.is_empty() {
             let feed = scalper_exchange::kraken::KrakenWsFeed::new(kraken_cfg.clone());
             let tx = market_tx.clone();
             let syms = map_symbols(&symbols, kraken_cfg);

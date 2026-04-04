@@ -151,6 +151,8 @@ struct Snapshot {
     // Data
     open_orders: Vec<OrderSnap>,
     markets: Vec<MarketSnap>,
+    // Exchange connection status
+    exchange_status: Vec<ExchangeStatus>,
     // Warmup
     warmup_ready: bool,
     indicators_ready: u32,
@@ -174,6 +176,13 @@ struct Snapshot {
     avg_loss: f64,
     best_trade: f64,
     worst_trade: f64,
+}
+
+#[derive(Serialize)]
+struct ExchangeStatus {
+    name: String,
+    connected: bool,
+    symbols: usize,
 }
 
 #[derive(Serialize)]
@@ -401,6 +410,25 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
         })
         .collect();
 
+    // Exchange connection status — check which exchanges have live orderbook data
+    use scalper_core::types::Exchange;
+    let mut exchange_status = Vec::new();
+    let configured_exchanges = [
+        ("Binance", Exchange::Binance),
+        ("Bybit", Exchange::Bybit),
+        ("OKX", Exchange::OKX),
+        ("Kraken", Exchange::Kraken),
+    ];
+    for (name, exch) in &configured_exchanges {
+        let sym_count = obs.values().filter(|ob| ob.exchange == *exch).count();
+        exchange_status.push(ExchangeStatus {
+            name: name.to_string(),
+            connected: sym_count > 0,
+            symbols: sym_count,
+        });
+    }
+    drop(obs);
+
     // Trade history + extended stats
     let trades_vec = state.trade_history.lock().await;
     let trades: Vec<TradeRecord> = trades_vec.clone();
@@ -444,6 +472,7 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
         regime,
         open_orders,
         markets,
+        exchange_status,
         warmup_ready,
         indicators_ready,
         indicators_total,
