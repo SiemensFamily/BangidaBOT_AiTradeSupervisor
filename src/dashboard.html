@@ -110,6 +110,11 @@
         .exch-led { display:flex; align-items:center; gap:4px; font-size:0.78em; color:#8b949e; }
         .exch-led .led { width:8px; height:8px; border-radius:50%; background:#f85149; }
         .exch-led .led.on { background:#2ea043; }
+        /* Strategy LEDs */
+        .strat-leds { display:flex; gap:10px; align-items:center; border-left:1px solid #30363d; padding-left:12px; margin-left:4px; }
+        .strat-led { display:flex; align-items:center; gap:4px; font-size:0.78em; color:#8b949e; }
+        .strat-led .led { width:8px; height:8px; border-radius:50%; background:#484f58; }
+        .strat-led .led.firing { background:#d29922; }
 
         /* Terminal */
         .terminal { background:#0d1117; border:1px solid #30363d; border-radius:8px; margin:16px 24px;
@@ -134,6 +139,7 @@
         </div>
         <div style="display:flex;align-items:center;gap:16px;">
             <div class="exch-leds" id="exchLeds"></div>
+            <div class="strat-leds" id="stratLeds"></div>
             <div style="display:flex;align-items:center;gap:6px;">
                 <span class="status-dot off" id="wsDot"></span>
                 <span class="meta" id="wsLabel">Connecting...</span>
@@ -623,6 +629,16 @@ function updateUI(d) {
         leds.innerHTML = d.exchange_status.map(e =>
             `<span class="exch-led"><span class="led ${e.connected?'on':''}"></span>${e.name}</span>`
         ).join('');
+    }
+
+    // Strategy LEDs
+    if (d.strategy_status) {
+        const sl = document.getElementById('stratLeds');
+        sl.innerHTML = d.strategy_status.map(s => {
+            const short = s.name.replace('_breakout','').replace('_imbalance','').replace('_wick','').replace('_bias','');
+            const tip = s.active ? `${s.side} (${(s.strength*100).toFixed(0)}%)` : 'idle';
+            return `<span class="strat-led" title="${s.name}: ${tip}"><span class="led ${s.active?'firing':''}"></span>${short}</span>`;
+        }).join('');
     }
 
     // Terminal (console log)

@@ -6,4 +6,4 @@ pub mod funding_arb;
 pub mod ensemble;
 
 pub use traits::{MarketContext, Strategy};
-pub use ensemble::EnsembleStrategy;
+pub use ensemble::{EnsembleStrategy, EvalResult, StrategyVote};

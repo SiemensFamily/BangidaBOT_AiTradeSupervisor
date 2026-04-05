@@ -21,6 +21,7 @@ use scalper_execution::order_tracker::OrderTracker;
 use scalper_risk::risk_manager::RiskManager;
 
 use crate::IndicatorState;
+use scalper_strategy::StrategyVote;
 
 // ── Trade history ──────────────────────────────────────────────────────────
 
@@ -102,6 +103,7 @@ pub struct DashboardState {
     pub console_log: Arc<Mutex<ConsoleLog>>,
     pub signal_log: Arc<Mutex<VecDeque<SignalRecord>>>,
     pub connected_exchanges: Arc<Mutex<HashSet<String>>>,
+    pub strategy_votes: Arc<Mutex<Vec<StrategyVote>>>,
     pub ws_tx: broadcast::Sender<String>,
 }
 
@@ -146,6 +148,8 @@ struct Snapshot {
     trade_history: Vec<TradeRecord>,
     // Exchange status
     exchange_status: Vec<ExchangeStatus>,
+    // Strategy status
+    strategy_status: Vec<StrategyStatusSnap>,
 }
 
 #[derive(Serialize)]
@@ -171,6 +175,14 @@ struct MarketSnap {
 struct ExchangeStatus {
     name: String,
     connected: bool,
+}
+
+#[derive(Serialize)]
+struct StrategyStatusSnap {
+    name: String,
+    active: bool,
+    side: String,
+    strength: f64,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -395,6 +407,19 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
         .collect();
     drop(connected);
 
+    // Strategy status
+    let votes = state.strategy_votes.lock().await;
+    let strategy_status: Vec<StrategyStatusSnap> = votes
+        .iter()
+        .map(|v| StrategyStatusSnap {
+            name: v.name.clone(),
+            active: v.fired,
+            side: v.side.map(|s| format!("{:?}", s)).unwrap_or_default(),
+            strength: v.strength,
+        })
+        .collect();
+    drop(votes);
+
     Snapshot {
         timestamp_ms: now_ms,
         mode: state.config_mode.clone(),
@@ -426,5 +451,6 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
         signal_log,
         trade_history,
         exchange_status,
+        strategy_status,
     }
 }

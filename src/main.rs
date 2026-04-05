@@ -12,6 +12,7 @@ use scalper_execution::{executor::Executor, order_tracker::OrderTracker};
 use scalper_risk::risk_manager::RiskManager;
 use scalper_strategy::{
     ensemble::EnsembleStrategy,
+    StrategyVote,
     funding_arb::FundingBiasStrategy,
     liquidation_wick::LiquidationWickStrategy,
     momentum::MomentumStrategy,
@@ -111,6 +112,8 @@ async fn main() -> Result<()> {
         Arc::new(Mutex::new(HashSet::new()));
     let trade_history: Arc<Mutex<Vec<dashboard::TradeRecord>>> =
         Arc::new(Mutex::new(Vec::new()));
+    let strategy_votes: Arc<Mutex<Vec<StrategyVote>>> =
+        Arc::new(Mutex::new(Vec::new()));
 
     // Log startup
     {
@@ -166,6 +169,7 @@ async fn main() -> Result<()> {
         let candle_mgr = candle_mgr.clone();
         let order_flow = order_flow.clone();
         let regime_detector = regime_detector.clone();
+        let strategy_votes = strategy_votes.clone();
 
         tokio::spawn(async move {
             info!("Strategy engine task started");
@@ -185,7 +189,9 @@ async fn main() -> Result<()> {
                     .await;
 
                     if let Some(ctx) = ctx {
-                        if let Some(signal) = ensemble.evaluate(&ctx) {
+                        let result = ensemble.evaluate_detailed(&ctx);
+                        *strategy_votes.lock().await = result.votes;
+                        if let Some(signal) = result.signal {
                             if signal_tx.send(signal).await.is_err() {
                                 return;
                             }
@@ -407,6 +413,7 @@ async fn main() -> Result<()> {
             console_log: console_log.clone(),
             signal_log,
             connected_exchanges,
+            strategy_votes,
             ws_tx,
         };
         tokio::spawn(dashboard::start_dashboard(dash_state));

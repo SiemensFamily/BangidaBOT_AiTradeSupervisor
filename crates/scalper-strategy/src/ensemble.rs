@@ -3,6 +3,21 @@ use tracing::debug;
 
 use crate::traits::{MarketContext, Strategy};
 
+/// Per-strategy vote from the last ensemble evaluation.
+#[derive(Debug, Clone)]
+pub struct StrategyVote {
+    pub name: String,
+    pub fired: bool,
+    pub side: Option<Side>,
+    pub strength: f64,
+}
+
+/// Result of a detailed ensemble evaluation.
+pub struct EvalResult {
+    pub signal: Option<Signal>,
+    pub votes: Vec<StrategyVote>,
+}
+
 /// Regime-adaptive ensemble strategy that combines signals from multiple
 /// child strategies using weighted voting.
 ///
@@ -47,12 +62,28 @@ impl EnsembleStrategy {
     }
 
     pub fn evaluate(&self, ctx: &MarketContext) -> Option<Signal> {
+        self.evaluate_detailed(ctx).signal
+    }
+
+    /// Evaluate all strategies and return both the ensemble signal and
+    /// per-strategy vote details for dashboard display.
+    pub fn evaluate_detailed(&self, ctx: &MarketContext) -> EvalResult {
+        let mut votes: Vec<StrategyVote> = Vec::new();
+
         if ctx.volatility_regime == VolatilityRegime::Extreme {
             debug!("Ensemble: EXTREME volatility regime — all strategies paused");
-            return None;
+            for strategy in &self.strategies {
+                votes.push(StrategyVote {
+                    name: strategy.name().to_string(),
+                    fired: false,
+                    side: None,
+                    strength: 0.0,
+                });
+            }
+            return EvalResult { signal: None, votes };
         }
 
-        // Evaluate all strategies
+        // Evaluate all strategies, capturing per-strategy votes
         let mut signals: Vec<(Signal, f64)> = Vec::new();
         for strategy in &self.strategies {
             let weight = self.regime_weight(
@@ -61,15 +92,34 @@ impl EnsembleStrategy {
                 strategy.weight(),
             );
             if weight <= 0.0 {
+                votes.push(StrategyVote {
+                    name: strategy.name().to_string(),
+                    fired: false,
+                    side: None,
+                    strength: 0.0,
+                });
                 continue;
             }
             if let Some(signal) = strategy.evaluate(ctx) {
+                votes.push(StrategyVote {
+                    name: strategy.name().to_string(),
+                    fired: true,
+                    side: Some(signal.side),
+                    strength: signal.strength,
+                });
                 signals.push((signal, weight));
+            } else {
+                votes.push(StrategyVote {
+                    name: strategy.name().to_string(),
+                    fired: false,
+                    side: None,
+                    strength: 0.0,
+                });
             }
         }
 
         if signals.is_empty() {
-            return None;
+            return EvalResult { signal: None, votes };
         }
 
         // Separate into buy and sell buckets
@@ -93,13 +143,13 @@ impl EnsembleStrategy {
         // Require minimum 2 strategies agreeing (unless only 1 strategy enabled)
         let total_enabled = self.strategies.len();
         if total_enabled > 1 && chosen_signals.len() < 2 {
-            return None;
+            return EvalResult { signal: None, votes };
         }
 
         // Calculate weighted average strength
         let total_weight: f64 = chosen_signals.iter().map(|(_, w)| w).sum();
         if total_weight <= 0.0 {
-            return None;
+            return EvalResult { signal: None, votes };
         }
         let weighted_strength: f64 = chosen_signals
             .iter()
@@ -113,7 +163,7 @@ impl EnsembleStrategy {
                 "Ensemble: weighted_strength {:.3} below threshold {:.3}",
                 weighted_strength, self.min_strength_threshold
             );
-            return None;
+            return EvalResult { signal: None, votes };
         }
 
         // Use TP/SL from the highest-weight signal that has them
@@ -138,7 +188,7 @@ impl EnsembleStrategy {
             side, ctx.symbol, weighted_strength, chosen_signals.len()
         );
 
-        Some(Signal {
+        let signal = Signal {
             strategy_name: "ensemble".to_string(),
             symbol: ctx.symbol.clone(),
             exchange: ctx.exchange,
@@ -148,7 +198,9 @@ impl EnsembleStrategy {
             take_profit: best_tp.or(best_signal.take_profit),
             stop_loss: best_sl.or(best_signal.stop_loss),
             timestamp_ms: ctx.timestamp_ms,
-        })
+        };
+
+        EvalResult { signal: Some(signal), votes }
     }
 }
 
