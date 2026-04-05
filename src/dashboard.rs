@@ -241,6 +241,7 @@ pub async fn start_dashboard(state: DashboardState) {
         .route("/sw.js", get(serve_sw))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/trades.csv", get(get_trades_csv))
+        .route("/api/debug", get(get_debug_snapshot))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
@@ -311,6 +312,14 @@ async fn put_config(
     // Update in-memory config
     *state.config.write().await = update.config;
     (axum::http::StatusCode::OK, "Config saved. Restart for full effect.".to_string())
+}
+
+// ── REST: Debug snapshot ──────────────────────────────────────────────────
+
+async fn get_debug_snapshot(State(state): State<DashboardState>) -> impl IntoResponse {
+    let snapshot = build_snapshot(&state).await;
+    let json = serde_json::to_string_pretty(&snapshot).unwrap_or_default();
+    ([(header::CONTENT_TYPE, "application/json")], json)
 }
 
 // ── REST: CSV export ───────────────────────────────────────────────────────

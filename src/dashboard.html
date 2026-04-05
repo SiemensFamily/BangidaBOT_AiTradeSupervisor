@@ -615,16 +615,18 @@ function updateUI(d) {
     }
 
     // Exchange LEDs
-    if (d.exchange_status) {
-        document.getElementById('exchLeds').innerHTML = d.exchange_status.map(e =>
-            `<span class="exch-led"><span class="led ${e.connected?'on':'off'}"></span>${e.name}</span>`
-        ).join('');
-    }
+    try {
+        if (d.exchange_status && d.exchange_status.length > 0) {
+            document.getElementById('exchLeds').innerHTML = d.exchange_status.map(e =>
+                `<span class="exch-led"><span class="led ${e.connected?'on':'off'}"></span>${e.name}</span>`
+            ).join('');
+        }
+    } catch(err) { console.error('LED error:', err); }
 
     // New tabs
-    renderTerminal(d);
-    renderTradeLog(d);
-    renderAnalystLog(d);
+    try { renderTerminal(d); } catch(err) { console.error('Terminal error:', err); }
+    try { renderTradeLog(d); } catch(err) { console.error('TradeLog error:', err); }
+    try { renderAnalystLog(d); } catch(err) { console.error('AnalystLog error:', err); }
 }
 
 /* ── New tab renderers ── */
@@ -686,7 +688,7 @@ function connect() {
     ws.onopen = () => { dot.className='status-dot ok'; lbl.textContent='Connected'; };
     ws.onclose = () => { dot.className='status-dot off'; lbl.textContent='Reconnecting...'; setTimeout(connect, 2000); };
     ws.onerror = () => ws.close();
-    ws.onmessage = e => { try { updateUI(JSON.parse(e.data)); } catch(err) { console.error(err); } };
+    ws.onmessage = e => { try { updateUI(JSON.parse(e.data)); } catch(err) { console.error('updateUI error:', err); } };
 }
 connect();
 
