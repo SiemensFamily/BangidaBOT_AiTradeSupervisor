@@ -22,6 +22,9 @@ pub struct KrakenAccountInfo {
 }
 
 /// Kraken Futures WebSocket message.
+///
+/// Kraken uses camelCase for some fields (e.g. `markPrice`, `fundingRate`).
+/// We use `#[serde(alias)]` so both snake_case and camelCase are accepted.
 #[derive(Debug, Deserialize)]
 pub struct WsMessage {
     pub feed: Option<String>,
@@ -34,9 +37,12 @@ pub struct WsMessage {
     pub price: Option<f64>,
     pub qty: Option<f64>,
     pub time: Option<u64>,
-    // Ticker
+    // Ticker — Kraken sends camelCase: markPrice, fundingRate, nextFundingRateTime
+    #[serde(alias = "markPrice")]
     pub mark_price: Option<f64>,
+    #[serde(alias = "fundingRate")]
     pub funding_rate: Option<f64>,
+    #[serde(alias = "nextFundingRateTime")]
     pub next_funding_rate_time: Option<u64>,
 }
 
