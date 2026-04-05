@@ -131,7 +131,30 @@ impl ScalperConfig {
             );
 
         let settings = builder.build()?;
-        let cfg: ScalperConfig = settings.try_deserialize()?;
+        let mut cfg: ScalperConfig = settings.try_deserialize()?;
+
+        // The config crate's Environment source can wipe nested HashMaps like
+        // symbol_map because env vars can only express leaf values. Backfill
+        // known defaults when the map is empty.
+        if let Some(ref mut kraken) = cfg.exchanges.kraken {
+            if kraken.symbol_map.is_empty() {
+                kraken.symbol_map.insert("BTCUSDT".into(), "PI_XBTUSD".into());
+                kraken.symbol_map.insert("ETHUSDT".into(), "PI_ETHUSD".into());
+            }
+        }
+        if let Some(ref mut binance) = cfg.exchanges.binance {
+            if binance.symbol_map.is_empty() {
+                binance.symbol_map.insert("BTCUSDT".into(), "BTCUSDT".into());
+                binance.symbol_map.insert("ETHUSDT".into(), "ETHUSDT".into());
+            }
+        }
+        if let Some(ref mut bybit) = cfg.exchanges.bybit {
+            if bybit.symbol_map.is_empty() {
+                bybit.symbol_map.insert("BTCUSDT".into(), "BTCUSDT".into());
+                bybit.symbol_map.insert("ETHUSDT".into(), "ETHUSDT".into());
+            }
+        }
+
         Ok(cfg)
     }
 }

@@ -66,6 +66,7 @@ async fn main() -> Result<()> {
         info!(
             kraken_api_key_len = k.api_key.len(),
             kraken_ws_url = %k.base_url_ws,
+            kraken_symbol_map_len = k.symbol_map.len(),
             "Kraken config resolved"
         );
     }
