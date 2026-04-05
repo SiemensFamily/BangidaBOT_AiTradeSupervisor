@@ -1,27 +1,29 @@
 [general]
 mode = "paper"
 
+# Binance — disabled (set base_url_ws to enable)
 [exchanges.binance]
 api_key = ""
 api_secret = ""
 base_url_rest = "https://testnet.binancefuture.com"
-base_url_ws = "wss://stream.binancefuture.com"
+base_url_ws = ""
 testnet = true
 
+# Bybit — disabled (set base_url_ws to enable)
 [exchanges.bybit]
 api_key = ""
 api_secret = ""
 base_url_rest = "https://api-testnet.bybit.com"
-base_url_ws = "wss://stream-testnet.bybit.com"
+base_url_ws = ""
 testnet = true
 
-# OKX — best for $100 accounts ($1 minimum order, -0.025% maker rebate)
+# OKX — disabled (set base_url_ws to enable)
 [exchanges.okx]
 api_key = ""
 api_secret = ""
 passphrase = ""
 base_url_rest = "https://www.okx.com"
-base_url_ws = "wss://ws.okx.com:8443"
+base_url_ws = ""
 testnet = false
 
 # Kraken Futures

@@ -95,6 +95,8 @@ async fn main() -> Result<()> {
         Arc::new(Mutex::new(Vec::new()));
     let console_log: Arc<Mutex<dashboard::ConsoleLog>> =
         Arc::new(Mutex::new(dashboard::ConsoleLog::new(500)));
+    let connected_exchanges: Arc<Mutex<std::collections::HashSet<String>>> =
+        Arc::new(Mutex::new(std::collections::HashSet::new()));
 
     // Log startup messages to console
     {
@@ -133,12 +135,29 @@ async fn main() -> Result<()> {
         let candle_mgr = candle_mgr.clone();
         let order_flow = order_flow.clone();
         let regime_detector = regime_detector.clone();
+        let connected_exchanges = connected_exchanges.clone();
+        let console_log = console_log.clone();
 
         tokio::spawn(async move {
             info!("Data aggregator task started");
             loop {
                 match market_rx.recv().await {
                     Ok(event) => {
+                        // Track exchange connections from incoming events
+                        let exch_name = match &event {
+                            MarketEvent::OrderBookUpdate { exchange, .. } |
+                            MarketEvent::Trade { exchange, .. } => Some(format!("{:?}", exchange)),
+                            _ => None,
+                        };
+                        if let Some(name) = exch_name {
+                            let mut ce = connected_exchanges.lock().await;
+                            if !ce.contains(&name) {
+                                console_log.lock().await.push("SUCCESS",
+                                    format!("{} exchange connected — receiving data", name));
+                                ce.insert(name);
+                            }
+                        }
+
                         process_market_event(
                             event,
                             &orderbooks,
@@ -507,6 +526,7 @@ async fn main() -> Result<()> {
             trade_history,
             signal_log,
             console_log: console_log.clone(),
+            connected_exchanges: connected_exchanges.clone(),
             ws_tx,
         };
         tokio::spawn(dashboard::start_dashboard(dash_state));
