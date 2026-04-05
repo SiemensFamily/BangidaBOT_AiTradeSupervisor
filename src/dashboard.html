@@ -4,11 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Crypto Scalper Dashboard</title>
-    <meta name="theme-color" content="#0d1117">
-    <meta name="description" content="Crypto Scalper Trading Bot Dashboard">
-    <link rel="manifest" href="/manifest.json">
-    <link rel="icon" href="/icon.svg" type="image/svg+xml">
-    <link rel="apple-touch-icon" href="/icon.svg">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
@@ -116,8 +111,7 @@
         .led { width:8px; height:8px; border-radius:50%; }
         .led.on { background:#2ea043; box-shadow:0 0 4px #2ea043; }
         .led.off { background:#484f58; }
-
-        /* Terminal tab */
+        /* Terminal */
         .terminal { background:#0d1117; padding:12px 24px; max-height:600px; overflow-y:auto;
                     font-family:'Consolas','Courier New',monospace; font-size:12px; }
         .term-line { padding:1px 0; white-space:pre-wrap; word-break:break-all; line-height:1.5; }
@@ -126,8 +120,7 @@
         .term-success { color:#2ea043; }
         .term-warn { color:#f0ad4e; }
         .term-error { color:#f85149; }
-
-        /* Trade/Analyst log tables */
+        /* Log tables */
         .log-summary { background:#161b22; border-bottom:1px solid #30363d; padding:10px 24px;
                        font-size:0.85em; color:#2ea043; font-weight:600; }
         .log-table-wrap { padding:0 24px; max-height:600px; overflow-y:auto; }
@@ -470,10 +463,7 @@
     <div class="tab-content" id="tab-tradelog">
         <div class="log-summary" id="tradeSummary">Total: 0 | Open: 0 | W/L: 0/0 (0%) | Total P&L: $0.00</div>
         <div class="log-table-wrap">
-            <table><thead><tr>
-                <th>#</th><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th>
-                <th>Entry</th><th>Exit</th><th>P&L</th><th>Status</th>
-            </tr></thead>
+            <table><thead><tr><th>#</th><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Status</th></tr></thead>
             <tbody id="tradeLogBody"></tbody></table>
         </div>
     </div>
@@ -482,10 +472,7 @@
     <div class="tab-content" id="tab-analyst">
         <div class="log-summary" id="analystSummary">Signals: 0 | TAKE: 0 SKIP: 0 | Avg Score: 0</div>
         <div class="log-table-wrap">
-            <table><thead><tr>
-                <th>#</th><th>Time</th><th>Symbol</th><th>Side</th><th>Action</th>
-                <th>Score</th><th>RSI</th><th>Trend</th><th>ATR</th><th>Regime</th><th>Reason</th>
-            </tr></thead>
+            <table><thead><tr><th>#</th><th>Time</th><th>Symbol</th><th>Side</th><th>Action</th><th>Score</th><th>RSI</th><th>Trend</th><th>ATR</th><th>Regime</th><th>Reason</th></tr></thead>
             <tbody id="analystBody"></tbody></table>
         </div>
     </div>
@@ -533,7 +520,6 @@ function toggleSection(el) {
 
 /* ── WebSocket + Live Update ── */
 let warmupFaded = false;
-let prevConsoleLen = 0;
 
 function updateUI(d) {
     // Header
@@ -545,21 +531,17 @@ function updateUI(d) {
     document.getElementById('uptime').textContent =
         hrs > 0 ? hrs+'h '+(mins%60)+'m' : mins+'m '+(d.uptime_secs%60)+'s';
 
-    // Warmup
+    // Warmup — stays visible permanently, just changes style when ready
     const wb = document.getElementById('warmupBanner');
     if (d.warmup_ready) {
-        if (!warmupFaded) {
-            wb.className = 'warmup-banner ready';
-            document.getElementById('warmupTitle').textContent = 'System Ready';
-            document.getElementById('indProg').style.width = '100%';
-            document.getElementById('indProg').className = 'prog-fill done';
-            document.getElementById('regProg').style.width = '100%';
-            document.getElementById('regProg').className = 'prog-fill done';
-            document.getElementById('indVal').textContent = d.indicators_total+'/'+d.indicators_total;
-            document.getElementById('regVal').textContent = d.regime_atr_needed+'/'+d.regime_atr_needed;
-            warmupFaded = true;
-            setTimeout(() => { wb.style.display = 'none'; }, 5000);
-        }
+        wb.className = 'warmup-banner ready';
+        document.getElementById('warmupTitle').textContent = 'System Ready — Scanning for trades';
+        document.getElementById('indProg').style.width = '100%';
+        document.getElementById('indProg').className = 'prog-fill done';
+        document.getElementById('regProg').style.width = '100%';
+        document.getElementById('regProg').className = 'prog-fill done';
+        document.getElementById('indVal').textContent = d.indicators_total+'/'+d.indicators_total;
+        document.getElementById('regVal').textContent = d.regime_atr_needed+'/'+d.regime_atr_needed;
     } else {
         const iPct = Math.round((d.indicators_ready / d.indicators_total) * 100);
         const rPct = Math.min(100, Math.round((d.regime_atr_count / d.regime_atr_needed) * 100));
@@ -634,20 +616,19 @@ function updateUI(d) {
 
     // Exchange LEDs
     if (d.exchange_status) {
-        const el = document.getElementById('exchLeds');
-        el.innerHTML = d.exchange_status.map(e =>
+        document.getElementById('exchLeds').innerHTML = d.exchange_status.map(e =>
             `<span class="exch-led"><span class="led ${e.connected?'on':'off'}"></span>${e.name}</span>`
         ).join('');
     }
 
-    // Terminal
+    // New tabs
     renderTerminal(d);
-    // Trade Log
     renderTradeLog(d);
-    // Analyst Log
     renderAnalystLog(d);
 }
 
+/* ── New tab renderers ── */
+let prevConsoleLen = 0;
 function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function fmtTime(ms) { return new Date(ms).toLocaleTimeString('en-US',{hour12:false}); }
 function fmtDT(ms) { const d=new Date(ms); return d.toLocaleDateString('en-US',{month:'2-digit',day:'2-digit'})+' '+d.toLocaleTimeString('en-US',{hour12:false}); }
@@ -656,8 +637,7 @@ function renderTerminal(d) {
     const entries = d.console || [];
     if (entries.length <= prevConsoleLen) return;
     const el = document.getElementById('terminalLog');
-    const newE = entries.slice(prevConsoleLen);
-    for (const e of newE) {
+    for (const e of entries.slice(prevConsoleLen)) {
         const line = document.createElement('div');
         line.className = 'term-line';
         const cls = {INFO:'term-info',SUCCESS:'term-success',WARN:'term-warn',ERROR:'term-error'}[e.level]||'term-info';
@@ -672,45 +652,32 @@ function renderTerminal(d) {
 function renderTradeLog(d) {
     const trades = d.trades || [];
     const open = d.open_orders ? d.open_orders.length : 0;
-    const wins = trades.filter(t=>t.pnl>0).length;
-    const losses = trades.filter(t=>t.pnl<=0).length;
-    const total = trades.length;
-    const totalPnl = trades.reduce((s,t)=>s+t.pnl,0);
-    const wr = total>0 ? (wins/total*100).toFixed(0) : 0;
+    const wins = trades.filter(t=>t.pnl>0).length, losses = trades.filter(t=>t.pnl<=0).length;
+    const total = trades.length, totalPnl = trades.reduce((s,t)=>s+t.pnl,0);
+    const wr = total>0?(wins/total*100).toFixed(0):0;
     document.getElementById('tradeSummary').innerHTML =
         `Total: <b>${total}</b> | Open: <b>${open}</b> | W/L: <span class="pos">${wins}</span>/<span class="neg">${losses}</span> (${wr}%) | Total P&L: <span class="${totalPnl>=0?'pnl-pos':'pnl-neg'}">${fmt$(totalPnl)}</span>`;
     const body = document.getElementById('tradeLogBody');
     body.innerHTML = '';
-    for (let i=trades.length-1; i>=0; i--) {
-        const t = trades[i];
-        const sc = t.side==='Buy'?'pos':'neg';
-        const pc = t.pnl>=0?'pnl-pos':'pnl-neg';
-        body.innerHTML += `<tr><td>${i+1}</td><td>${fmtDT(t.timestamp_ms)}</td><td>${t.symbol}</td>`+
-            `<td class="${sc}">${t.side==='Buy'?'LONG':'SHORT'}</td><td>${t.quantity}</td>`+
-            `<td>${t.entry_price||t.price}</td><td>${t.exit_price||'-'}</td>`+
-            `<td class="${pc}">${fmt$(t.pnl)}</td><td>${t.status||'CLOSED'}</td></tr>`;
+    for (let i=trades.length-1;i>=0;i--) {
+        const t=trades[i], sc=t.side==='Buy'?'pos':'neg', pc=t.pnl>=0?'pnl-pos':'pnl-neg';
+        body.innerHTML+=`<tr><td>${i+1}</td><td>${fmtDT(t.timestamp_ms)}</td><td>${t.symbol}</td><td class="${sc}">${t.side==='Buy'?'LONG':'SHORT'}</td><td>${t.quantity}</td><td>${t.entry_price||t.price}</td><td>${t.exit_price||'-'}</td><td class="${pc}">${fmt$(t.pnl)}</td><td>${t.status||'CLOSED'}</td></tr>`;
     }
 }
 
 function renderAnalystLog(d) {
     const signals = d.signals || [];
-    const takes = signals.filter(s=>s.action==='TAKE').length;
-    const skips = signals.filter(s=>s.action==='SKIP').length;
-    const avg = signals.length>0 ? (signals.reduce((s,r)=>s+r.score,0)/signals.length).toFixed(0) : 0;
+    const takes=signals.filter(s=>s.action==='TAKE').length, skips=signals.filter(s=>s.action==='SKIP').length;
+    const avg=signals.length>0?(signals.reduce((s,r)=>s+r.score,0)/signals.length).toFixed(0):0;
     document.getElementById('analystSummary').innerHTML =
         `Signals: <b>${signals.length}</b> | TAKE: <span class="pos">${takes}</span> SKIP: <span class="neg">${skips}</span> | Avg Score: <b>${avg}</b>`;
     const body = document.getElementById('analystBody');
     body.innerHTML = '';
-    for (let i=signals.length-1; i>=0; i--) {
-        const s = signals[i];
-        const sc = s.side==='Buy'?'pos':'neg';
-        const ac = s.action==='TAKE'?'act-take':'act-skip';
-        body.innerHTML += `<tr><td>${i+1}</td><td>${fmtDT(s.timestamp_ms)}</td><td>${s.symbol}</td>`+
-            `<td class="${sc}">${s.side}</td><td class="${ac}">${s.action}</td>`+
-            `<td>${s.score.toFixed(0)}</td><td>${s.rsi.toFixed(1)}</td><td>${s.ema_trend}</td>`+
-            `<td>${s.atr.toFixed(4)}</td><td>${s.regime}</td>`+
-            `<td style="max-width:250px;overflow:hidden;text-overflow:ellipsis" title="${escHtml(s.reason)}">${escHtml(s.reason)}</td></tr>`;
+    for (let i=signals.length-1;i>=0;i--) {
+        const s=signals[i], sc=s.side==='Buy'?'pos':'neg', ac=s.action==='TAKE'?'pos':'neg';
+        body.innerHTML+=`<tr><td>${i+1}</td><td>${fmtDT(s.timestamp_ms)}</td><td>${s.symbol}</td><td class="${sc}">${s.side}</td><td class="${ac}">${s.action}</td><td>${s.score.toFixed(0)}</td><td>${s.rsi.toFixed(1)}</td><td>${s.ema_trend}</td><td>${s.atr.toFixed(4)}</td><td>${s.regime}</td><td style="max-width:250px;overflow:hidden;text-overflow:ellipsis" title="${escHtml(s.reason)}">${escHtml(s.reason)}</td></tr>`;
     }
+}
 
 function connect() {
     const ws = new WebSocket('ws://' + location.host + '/ws');
@@ -793,10 +760,6 @@ function showToast(msg, cls) {
     const el = document.getElementById('saveToast');
     el.textContent = msg; el.className = 'toast '+cls;
     setTimeout(() => { el.textContent=''; el.className=''; }, 4000);
-}
-
-if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
 </script>
 </body>
