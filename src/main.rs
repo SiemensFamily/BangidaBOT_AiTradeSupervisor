@@ -170,6 +170,19 @@ async fn main() -> Result<()> {
         let order_flow = order_flow.clone();
         let regime_detector = regime_detector.clone();
         let strategy_votes = strategy_votes.clone();
+        // Build map of config symbol → all possible orderbook keys (including mapped names)
+        let mut symbol_lookup: HashMap<String, Vec<String>> = HashMap::new();
+        for s in &symbols {
+            let mut keys = vec![s.clone()];
+            for cfg in [&config.exchanges.binance, &config.exchanges.bybit, &config.exchanges.kraken] {
+                if let Some(c) = cfg {
+                    if let Some(mapped) = c.symbol_map.get(s) {
+                        keys.push(mapped.clone());
+                    }
+                }
+            }
+            symbol_lookup.insert(s.clone(), keys);
+        }
 
         tokio::spawn(async move {
             info!("Strategy engine task started");
@@ -178,17 +191,25 @@ async fn main() -> Result<()> {
                 interval.tick().await;
 
                 for symbol in &symbols {
-                    let ctx = build_market_context(
-                        symbol,
-                        &orderbooks,
-                        &indicators,
-                        &candle_mgr,
-                        &order_flow,
-                        &regime_detector,
-                    )
-                    .await;
+                    // Try config symbol first, then mapped aliases
+                    let candidates = symbol_lookup.get(symbol.as_str()).cloned().unwrap_or_else(|| vec![symbol.clone()]);
+                    let mut ctx_opt = None;
+                    for key in &candidates {
+                        ctx_opt = build_market_context(
+                            key,
+                            &orderbooks,
+                            &indicators,
+                            &candle_mgr,
+                            &order_flow,
+                            &regime_detector,
+                        )
+                        .await;
+                        if ctx_opt.is_some() {
+                            break;
+                        }
+                    }
 
-                    if let Some(ctx) = ctx {
+                    if let Some(ctx) = ctx_opt {
                         let result = ensemble.evaluate_detailed(&ctx);
                         *strategy_votes.lock().await = result.votes;
                         if let Some(signal) = result.signal {
