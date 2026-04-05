@@ -105,6 +105,23 @@
         .regime-tbl th, .regime-tbl td { padding:6px 12px; border:1px solid #30363d; font-size:0.82em; text-align:center; }
         .regime-tbl th { background:#21262d; color:#58a6ff; }
 
+        /* Exchange LEDs */
+        .exch-leds { display:flex; gap:10px; align-items:center; }
+        .exch-led { display:flex; align-items:center; gap:4px; font-size:0.78em; color:#8b949e; }
+        .exch-led .led { width:8px; height:8px; border-radius:50%; background:#f85149; }
+        .exch-led .led.on { background:#2ea043; }
+
+        /* Terminal */
+        .terminal { background:#0d1117; border:1px solid #30363d; border-radius:8px; margin:16px 24px;
+                     height:400px; overflow-y:auto; padding:12px; font-family:'Courier New',monospace; font-size:0.82em; }
+        .term-line { padding:2px 0; color:#8b949e; }
+        .term-line .ts { color:#484f58; margin-right:8px; }
+        .term-line .msg { color:#c9d1d9; }
+
+        /* Log tables */
+        .log-wrap { padding:16px 24px; }
+        .log-wrap table { width:100%; }
+
         @media (max-width:1000px) { .grid { grid-template-columns:1fr; } .wide { grid-column:span 1; } }
     </style>
 </head>
@@ -115,9 +132,12 @@
             <span class="mode" id="mode">PAPER</span>
             <span class="meta">Uptime: <span id="uptime">--</span></span>
         </div>
-        <div style="display:flex;align-items:center;gap:6px;">
-            <span class="status-dot off" id="wsDot"></span>
-            <span class="meta" id="wsLabel">Connecting...</span>
+        <div style="display:flex;align-items:center;gap:16px;">
+            <div class="exch-leds" id="exchLeds"></div>
+            <div style="display:flex;align-items:center;gap:6px;">
+                <span class="status-dot off" id="wsDot"></span>
+                <span class="meta" id="wsLabel">Connecting...</span>
+            </div>
         </div>
     </div>
 
@@ -139,6 +159,9 @@
     <!-- Tab Bar -->
     <div class="tab-bar">
         <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
+        <button class="tab-btn" onclick="switchTab('terminal')">Terminal</button>
+        <button class="tab-btn" onclick="switchTab('tradelog')">Trade Log</button>
+        <button class="tab-btn" onclick="switchTab('analyst')">Analyst Log</button>
         <button class="tab-btn" onclick="switchTab('settings')">Settings</button>
         <button class="tab-btn" onclick="switchTab('tradelogic')">Trade Logic</button>
     </div>
@@ -189,6 +212,35 @@
                 <tbody id="marketsBody"></tbody></table>
                 <div class="empty-msg" id="noMarkets">Waiting for data...</div>
             </div>
+        </div>
+    </div>
+
+    <!-- Terminal Tab -->
+    <div class="tab-content" id="tab-terminal">
+        <div class="terminal" id="terminalOutput">
+            <div class="term-line"><span class="msg" style="color:#484f58;">Waiting for data...</span></div>
+        </div>
+    </div>
+
+    <!-- Trade Log Tab -->
+    <div class="tab-content" id="tab-tradelog">
+        <div class="log-wrap">
+            <table>
+                <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Price</th><th>Qty</th><th>PnL</th><th>Fees</th><th>Order ID</th></tr></thead>
+                <tbody id="tradeLogBody"></tbody>
+            </table>
+            <div class="empty-msg" id="noTrades">No trades yet</div>
+        </div>
+    </div>
+
+    <!-- Analyst Log Tab -->
+    <div class="tab-content" id="tab-analyst">
+        <div class="log-wrap">
+            <table>
+                <thead><tr><th>Time</th><th>Symbol</th><th>Strategy</th><th>Side</th><th>Strength</th><th>Accepted</th></tr></thead>
+                <tbody id="analystLogBody"></tbody>
+            </table>
+            <div class="empty-msg" id="noSignals">No signals yet</div>
         </div>
     </div>
 
@@ -563,6 +615,60 @@ function updateUI(d) {
         mb.innerHTML = d.markets.map(m =>
             `<tr><td>${m.symbol}</td><td>${m.best_bid}</td><td>${m.best_ask}</td><td>${m.spread}</td></tr>`
         ).join('');
+    }
+
+    // Exchange LEDs
+    if (d.exchange_status) {
+        const leds = document.getElementById('exchLeds');
+        leds.innerHTML = d.exchange_status.map(e =>
+            `<span class="exch-led"><span class="led ${e.connected?'on':''}"></span>${e.name}</span>`
+        ).join('');
+    }
+
+    // Terminal (console log)
+    if (d.console_log) {
+        const term = document.getElementById('terminalOutput');
+        term.innerHTML = d.console_log.map(e => {
+            const t = new Date(e.timestamp_ms).toLocaleTimeString();
+            return `<div class="term-line"><span class="ts">[${t}]</span><span class="msg">${e.message}</span></div>`;
+        }).join('');
+        term.scrollTop = term.scrollHeight;
+    }
+
+    // Trade Log
+    if (d.trade_history) {
+        const tlb = document.getElementById('tradeLogBody');
+        const nt = document.getElementById('noTrades');
+        if (d.trade_history.length === 0) { tlb.innerHTML=''; nt.style.display='block'; }
+        else {
+            nt.style.display='none';
+            tlb.innerHTML = d.trade_history.slice().reverse().map(t => {
+                const time = new Date(t.timestamp_ms).toLocaleTimeString();
+                return `<tr><td>${time}</td><td>${t.symbol}</td>`+
+                    `<td class="${t.side==='Buy'?'pos':'neg'}">${t.side}</td>`+
+                    `<td>${t.price}</td><td>${t.quantity}</td>`+
+                    `<td class="${t.pnl>=0?'pos':'neg'}">${fmt$(t.pnl)}</td>`+
+                    `<td>$${t.fees.toFixed(4)}</td>`+
+                    `<td>${t.order_id.slice(0,12)}</td></tr>`;
+            }).join('');
+        }
+    }
+
+    // Analyst Log (signal log)
+    if (d.signal_log) {
+        const alb = document.getElementById('analystLogBody');
+        const ns = document.getElementById('noSignals');
+        if (d.signal_log.length === 0) { alb.innerHTML=''; ns.style.display='block'; }
+        else {
+            ns.style.display='none';
+            alb.innerHTML = d.signal_log.slice().reverse().map(s => {
+                const time = new Date(s.timestamp_ms).toLocaleTimeString();
+                return `<tr><td>${time}</td><td>${s.symbol}</td><td>${s.strategy}</td>`+
+                    `<td class="${s.side==='Buy'?'pos':'neg'}">${s.side}</td>`+
+                    `<td>${s.strength.toFixed(3)}</td>`+
+                    `<td><span class="badge ${s.accepted?'ok':'halt'}">${s.accepted?'YES':'NO'}</span></td></tr>`;
+            }).join('');
+        }
     }
 }
 
