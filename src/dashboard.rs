@@ -357,9 +357,11 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
     let total_fees = tracker.total_fees();
     let drawdown_pct = tracker.drawdown_pct();
     let win_rate = tracker.win_rate();
-    let profit_factor = tracker.profit_factor();
+    let pf = tracker.profit_factor();
+    let profit_factor = if pf.is_finite() { pf } else { 0.0 };
     let total_trades = tracker.total_trades();
-    let expectancy = tracker.expectancy();
+    let exp = tracker.expectancy();
+    let expectancy = if exp.is_finite() { exp } else { 0.0 };
 
     let can_trade = cb.can_trade(now_ms);
     let consecutive_losses = cb.consecutive_losses();
