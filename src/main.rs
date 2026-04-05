@@ -18,17 +18,26 @@ use scalper_strategy::{
     ob_imbalance::ObImbalanceStrategy,
     traits::{MarketContext, Strategy},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{error, info, warn};
 
 mod dashboard;
+mod paper_sim;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load environment variables from .env file
-    let _ = dotenvy::dotenv();
+    match dotenvy::dotenv() {
+        Ok(path) => {
+            // tracing not initialised yet — use eprintln so it's visible in the terminal
+            eprintln!("[init] .env loaded from {}", path.display());
+        }
+        Err(_) => {
+            eprintln!("[init] No .env file found, using environment variables only");
+        }
+    }
 
     // Initialize tracing
     tracing_subscriber::fmt()
@@ -51,6 +60,15 @@ async fn main() -> Result<()> {
         leverage = config.trading.default_leverage,
         "Configuration loaded"
     );
+
+    // Log resolved exchange key status (without exposing secrets)
+    if let Some(ref k) = config.exchanges.kraken {
+        info!(
+            kraken_api_key_len = k.api_key.len(),
+            kraken_ws_url = %k.base_url_ws,
+            "Kraken config resolved"
+        );
+    }
 
     // Initialize risk manager
     let initial_equity = config.risk.min_equity * 4.0; // Start at 4x min to have room
@@ -84,8 +102,24 @@ async fn main() -> Result<()> {
     let regime_detector: Arc<Mutex<RegimeDetector>> =
         Arc::new(Mutex::new(RegimeDetector::new()));
 
+    // Shared dashboard state (created early so tasks can log to it)
+    let console_log = Arc::new(Mutex::new(dashboard::ConsoleLog::new(200)));
+    let signal_log: Arc<Mutex<VecDeque<dashboard::SignalRecord>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
+    let connected_exchanges: Arc<Mutex<HashSet<String>>> =
+        Arc::new(Mutex::new(HashSet::new()));
+    let trade_history: Arc<Mutex<Vec<dashboard::TradeRecord>>> =
+        Arc::new(Mutex::new(Vec::new()));
+
+    // Log startup
+    {
+        let mut cl = console_log.lock().await;
+        cl.push(format!("Crypto Scalper starting in {} mode", mode));
+        cl.push(format!("Symbols: {:?}", config.trading.symbols));
+    }
+
     // Task a: Spawn exchange WebSocket feeds → market_tx
-    spawn_exchange_feeds(&config, market_tx.clone());
+    spawn_exchange_feeds(&config, market_tx.clone(), connected_exchanges.clone(), console_log.clone());
 
     // Task b: Data aggregator — market_rx → update orderbook, indicators, candles
     {
@@ -166,6 +200,8 @@ async fn main() -> Result<()> {
         let risk_manager = risk_manager.clone();
         let regime_detector = regime_detector.clone();
         let indicators = indicators.clone();
+        let signal_log = signal_log.clone();
+        let console_log = console_log.clone();
 
         tokio::spawn(async move {
             info!("Risk pipeline task started");
@@ -177,7 +213,33 @@ async fn main() -> Result<()> {
                 let price = decimal_to_f64(signal.take_profit.unwrap_or_default()); // approximate
                 let now_ms = signal.timestamp_ms;
 
-                if let Some(validated) = rm.validate_signal(&signal, regime, atr, price, now_ms) {
+                let accepted = rm.validate_signal(&signal, regime, atr, price, now_ms);
+
+                // Log signal to analyst log
+                {
+                    let record = dashboard::SignalRecord {
+                        timestamp_ms: now_ms,
+                        symbol: signal.symbol.clone(),
+                        strategy: signal.strategy_name.clone(),
+                        side: format!("{:?}", signal.side),
+                        strength: signal.strength,
+                        accepted: accepted.is_some(),
+                    };
+                    let mut sl = signal_log.lock().await;
+                    if sl.len() >= 200 {
+                        sl.pop_front();
+                    }
+                    sl.push_back(record);
+                }
+
+                if let Some(validated) = accepted {
+                    console_log.lock().await.push(format!(
+                        "Signal accepted: {} {:?} {} (strength: {:.2})",
+                        signal.strategy_name,
+                        signal.side,
+                        signal.symbol,
+                        signal.strength
+                    ));
                     if order_tx.send(validated).await.is_err() {
                         break;
                     }
@@ -270,12 +332,47 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Shared config + trade history for dashboard
+    // Shared config for dashboard
     let shared_config = Arc::new(tokio::sync::RwLock::new(config.clone()));
-    let trade_history: Arc<Mutex<Vec<dashboard::TradeRecord>>> =
-        Arc::new(Mutex::new(Vec::new()));
 
-    // Task h: Web dashboard
+    // Task h: Heartbeat — log scanning status every 10s
+    {
+        let console_log = console_log.clone();
+        let orderbooks = orderbooks.clone();
+        let config_symbols = config.trading.symbols.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                let obs = orderbooks.lock().await;
+                let active = config_symbols.iter().filter(|s| obs.contains_key(*s)).count();
+                drop(obs);
+                console_log.lock().await.push(format!(
+                    "Scanning markets... {}/{} symbols active",
+                    active,
+                    config_symbols.len()
+                ));
+            }
+        });
+    }
+
+    // Task i: Paper fill simulator
+    {
+        let order_tracker = order_tracker.clone();
+        let orderbooks = orderbooks.clone();
+        let risk_manager = risk_manager.clone();
+        let trade_history = trade_history.clone();
+        let console_log = console_log.clone();
+        tokio::spawn(paper_sim::run_paper_sim(
+            order_tracker,
+            orderbooks,
+            risk_manager,
+            trade_history,
+            console_log,
+        ));
+    }
+
+    // Task j: Web dashboard
     {
         let (ws_tx, _) = broadcast::channel::<String>(64);
         let dash_state = dashboard::DashboardState {
@@ -289,6 +386,9 @@ async fn main() -> Result<()> {
             indicators: indicators.clone(),
             config: shared_config,
             trade_history,
+            console_log: console_log.clone(),
+            signal_log,
+            connected_exchanges,
             ws_tx,
         };
         tokio::spawn(dashboard::start_dashboard(dash_state));
@@ -356,63 +456,124 @@ fn map_symbols(symbols: &[String], cfg: &scalper_core::config::ExchangeConfig) -
         .collect()
 }
 
-fn spawn_exchange_feeds(config: &ScalperConfig, market_tx: broadcast::Sender<MarketEvent>) {
+fn spawn_exchange_feeds(
+    config: &ScalperConfig,
+    market_tx: broadcast::Sender<MarketEvent>,
+    connected_exchanges: Arc<Mutex<HashSet<String>>>,
+    console_log: Arc<Mutex<dashboard::ConsoleLog>>,
+) {
     let symbols = config.trading.symbols.clone();
 
     if let Some(ref binance_cfg) = config.exchanges.binance {
-        if !binance_cfg.api_key.is_empty() {
+        if !binance_cfg.api_key.is_empty() && !binance_cfg.base_url_ws.is_empty() {
             let feed = scalper_exchange::binance::BinanceWsFeed::new(binance_cfg.clone());
             let tx = market_tx.clone();
             let syms = map_symbols(&symbols, binance_cfg);
+            let ce = connected_exchanges.clone();
+            let cl = console_log.clone();
             tokio::spawn(async move {
+                ce.lock().await.insert("binance".to_string());
+                cl.lock().await.push("Binance WebSocket connected".to_string());
                 if let Err(e) = scalper_exchange::MarketDataFeed::subscribe(&feed, &syms, tx).await {
                     error!("Binance feed error: {e}");
+                    ce.lock().await.remove("binance");
+                    cl.lock().await.push(format!("Binance disconnected: {e}"));
                 }
             });
             info!("Binance WebSocket feed spawned");
+        } else {
+            info!(
+                api_key_set = !binance_cfg.api_key.is_empty(),
+                ws_url_set = !binance_cfg.base_url_ws.is_empty(),
+                "Binance feed skipped (missing api_key or base_url_ws)"
+            );
         }
+    } else {
+        info!("Binance exchange not configured");
     }
 
     if let Some(ref bybit_cfg) = config.exchanges.bybit {
-        if !bybit_cfg.api_key.is_empty() {
+        if !bybit_cfg.api_key.is_empty() && !bybit_cfg.base_url_ws.is_empty() {
             let feed = scalper_exchange::bybit::BybitWsFeed::new(bybit_cfg.clone());
             let tx = market_tx.clone();
             let syms = map_symbols(&symbols, bybit_cfg);
+            let ce = connected_exchanges.clone();
+            let cl = console_log.clone();
             tokio::spawn(async move {
+                ce.lock().await.insert("bybit".to_string());
+                cl.lock().await.push("Bybit WebSocket connected".to_string());
                 if let Err(e) = scalper_exchange::MarketDataFeed::subscribe(&feed, &syms, tx).await {
                     error!("Bybit feed error: {e}");
+                    ce.lock().await.remove("bybit");
+                    cl.lock().await.push(format!("Bybit disconnected: {e}"));
                 }
             });
             info!("Bybit WebSocket feed spawned");
+        } else {
+            info!(
+                api_key_set = !bybit_cfg.api_key.is_empty(),
+                ws_url_set = !bybit_cfg.base_url_ws.is_empty(),
+                "Bybit feed skipped (missing api_key or base_url_ws)"
+            );
         }
+    } else {
+        info!("Bybit exchange not configured");
     }
 
     if let Some(ref okx_cfg) = config.exchanges.okx {
-        if !okx_cfg.api_key.is_empty() {
+        if !okx_cfg.api_key.is_empty() && !okx_cfg.base_url_ws.is_empty() {
             let feed = scalper_exchange::okx::OkxWsFeed::new(okx_cfg.clone());
             let tx = market_tx.clone();
             let syms = symbols.clone(); // OKX uses standard symbols
+            let ce = connected_exchanges.clone();
+            let cl = console_log.clone();
             tokio::spawn(async move {
+                ce.lock().await.insert("okx".to_string());
+                cl.lock().await.push("OKX WebSocket connected".to_string());
                 if let Err(e) = scalper_exchange::MarketDataFeed::subscribe(&feed, &syms, tx).await {
                     error!("OKX feed error: {e}");
+                    ce.lock().await.remove("okx");
+                    cl.lock().await.push(format!("OKX disconnected: {e}"));
                 }
             });
             info!("OKX WebSocket feed spawned");
+        } else {
+            info!(
+                api_key_set = !okx_cfg.api_key.is_empty(),
+                ws_url_set = !okx_cfg.base_url_ws.is_empty(),
+                "OKX feed skipped (missing api_key or base_url_ws)"
+            );
         }
+    } else {
+        info!("OKX exchange not configured");
     }
 
     if let Some(ref kraken_cfg) = config.exchanges.kraken {
-        if !kraken_cfg.api_key.is_empty() {
+        if !kraken_cfg.api_key.is_empty() && !kraken_cfg.base_url_ws.is_empty() {
             let feed = scalper_exchange::kraken::KrakenWsFeed::new(kraken_cfg.clone());
             let tx = market_tx.clone();
             let syms = map_symbols(&symbols, kraken_cfg);
+            let ce = connected_exchanges.clone();
+            let cl = console_log.clone();
             tokio::spawn(async move {
+                ce.lock().await.insert("kraken".to_string());
+                cl.lock().await.push("Kraken WebSocket connected".to_string());
                 if let Err(e) = scalper_exchange::MarketDataFeed::subscribe(&feed, &syms, tx).await {
                     error!("Kraken feed error: {e}");
+                    ce.lock().await.remove("kraken");
+                    cl.lock().await.push(format!("Kraken disconnected: {e}"));
                 }
             });
             info!("Kraken WebSocket feed spawned");
+        } else {
+            info!(
+                api_key_set = !kraken_cfg.api_key.is_empty(),
+                ws_url_set = !kraken_cfg.base_url_ws.is_empty(),
+                "Kraken feed skipped (missing api_key or base_url_ws)"
+            );
         }
+    } else {
+        info!("Kraken exchange not configured");
     }
 }
 

@@ -9,7 +9,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::info;
@@ -36,6 +36,55 @@ pub struct TradeRecord {
     pub order_id: String,
 }
 
+// ── Console log ───────────────────────────────────────────────────────────
+
+#[derive(Clone, Serialize)]
+pub struct ConsoleEntry {
+    pub timestamp_ms: u64,
+    pub message: String,
+}
+
+pub struct ConsoleLog {
+    entries: VecDeque<ConsoleEntry>,
+    capacity: usize,
+}
+
+impl ConsoleLog {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    pub fn push(&mut self, message: String) {
+        let entry = ConsoleEntry {
+            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+            message,
+        };
+        if self.entries.len() >= self.capacity {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(entry);
+    }
+
+    pub fn entries(&self) -> Vec<ConsoleEntry> {
+        self.entries.iter().cloned().collect()
+    }
+}
+
+// ── Signal log ────────────────────────────────────────────────────────────
+
+#[derive(Clone, Serialize)]
+pub struct SignalRecord {
+    pub timestamp_ms: u64,
+    pub symbol: String,
+    pub strategy: String,
+    pub side: String,
+    pub strength: f64,
+    pub accepted: bool,
+}
+
 // ── Shared state ───────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -50,6 +99,9 @@ pub struct DashboardState {
     pub indicators: Arc<Mutex<IndicatorState>>,
     pub config: Arc<RwLock<ScalperConfig>>,
     pub trade_history: Arc<Mutex<Vec<TradeRecord>>>,
+    pub console_log: Arc<Mutex<ConsoleLog>>,
+    pub signal_log: Arc<Mutex<VecDeque<SignalRecord>>>,
+    pub connected_exchanges: Arc<Mutex<HashSet<String>>>,
     pub ws_tx: broadcast::Sender<String>,
 }
 
@@ -88,6 +140,12 @@ struct Snapshot {
     regime_ready: bool,
     regime_atr_count: usize,
     regime_atr_needed: usize,
+    // Console & logs
+    console_log: Vec<ConsoleEntry>,
+    signal_log: Vec<SignalRecord>,
+    trade_history: Vec<TradeRecord>,
+    // Exchange status
+    exchange_status: Vec<ExchangeStatus>,
 }
 
 #[derive(Serialize)]
@@ -107,6 +165,19 @@ struct MarketSnap {
     best_bid: String,
     best_ask: String,
     spread: String,
+}
+
+#[derive(Serialize)]
+struct ExchangeStatus {
+    name: String,
+    connected: bool,
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+/// Replace INFINITY, NEG_INFINITY, NaN with 0.0 so serde_json doesn't error.
+fn sanitize_f64(v: f64) -> f64 {
+    if v.is_finite() { v } else { 0.0 }
 }
 
 // ── HTML ───────────────────────────────────────────────────────────────────
@@ -137,6 +208,7 @@ pub async fn start_dashboard(state: DashboardState) {
         .route("/ws", get(ws_handler))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/trades.csv", get(get_trades_csv))
+        .route("/api/debug", get(get_debug))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
@@ -214,6 +286,12 @@ async fn get_trades_csv(State(state): State<DashboardState>) -> impl IntoRespons
     )
 }
 
+// ── REST: Debug ───────────────────────────────────────────────────────────
+
+async fn get_debug(State(state): State<DashboardState>) -> Json<Snapshot> {
+    Json(build_snapshot(&state).await)
+}
+
 // ── Snapshot builder ───────────────────────────────────────────────────────
 
 async fn build_snapshot(state: &DashboardState) -> Snapshot {
@@ -225,21 +303,21 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
     let tracker = rm.pnl_tracker();
     let cb = rm.circuit_breaker();
 
-    let equity = tracker.equity();
-    let starting_equity = tracker.starting_equity();
-    let daily_pnl = tracker.daily_pnl();
-    let total_pnl = tracker.total_pnl();
-    let total_fees = tracker.total_fees();
-    let drawdown_pct = tracker.drawdown_pct();
-    let win_rate = tracker.win_rate();
-    let profit_factor = tracker.profit_factor();
+    let equity = sanitize_f64(tracker.equity());
+    let starting_equity = sanitize_f64(tracker.starting_equity());
+    let daily_pnl = sanitize_f64(tracker.daily_pnl());
+    let total_pnl = sanitize_f64(tracker.total_pnl());
+    let total_fees = sanitize_f64(tracker.total_fees());
+    let drawdown_pct = sanitize_f64(tracker.drawdown_pct());
+    let win_rate = sanitize_f64(tracker.win_rate());
+    let profit_factor = sanitize_f64(tracker.profit_factor());
     let total_trades = tracker.total_trades();
-    let expectancy = tracker.expectancy();
+    let expectancy = sanitize_f64(tracker.expectancy());
 
     let can_trade = cb.can_trade(now_ms);
     let consecutive_losses = cb.consecutive_losses();
     let trades_this_hour = cb.trades_this_hour();
-    let daily_loss = cb.daily_loss();
+    let daily_loss = sanitize_f64(cb.daily_loss());
     drop(rm);
 
     // Regime
@@ -290,6 +368,32 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
             })
         })
         .collect();
+    drop(obs);
+
+    // Console log
+    let console_log = state.console_log.lock().await.entries();
+
+    // Signal log (last 100)
+    let sig = state.signal_log.lock().await;
+    let signal_log: Vec<SignalRecord> = sig.iter().cloned().collect();
+    drop(sig);
+
+    // Trade history (last 100)
+    let th = state.trade_history.lock().await;
+    let trade_history: Vec<TradeRecord> = th.iter().rev().take(100).rev().cloned().collect();
+    drop(th);
+
+    // Exchange status
+    let connected = state.connected_exchanges.lock().await;
+    let all_exchanges = ["binance", "bybit", "okx", "kraken"];
+    let exchange_status: Vec<ExchangeStatus> = all_exchanges
+        .iter()
+        .map(|name| ExchangeStatus {
+            name: name.to_string(),
+            connected: connected.contains(*name),
+        })
+        .collect();
+    drop(connected);
 
     Snapshot {
         timestamp_ms: now_ms,
@@ -318,5 +422,9 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
         regime_ready,
         regime_atr_count,
         regime_atr_needed,
+        console_log,
+        signal_log,
+        trade_history,
+        exchange_status,
     }
 }

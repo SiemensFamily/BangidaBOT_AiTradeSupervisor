@@ -125,6 +125,7 @@ impl ScalperConfig {
             )
             .add_source(
                 config::Environment::with_prefix("SCALPER")
+                    .prefix_separator("__")
                     .separator("__")
                     .try_parsing(true),
             );
