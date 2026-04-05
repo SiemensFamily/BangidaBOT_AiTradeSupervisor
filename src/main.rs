@@ -464,7 +464,15 @@ fn spawn_exchange_feeds(
                 }
             });
             info!("Binance WebSocket feed spawned");
+        } else {
+            info!(
+                api_key_set = !binance_cfg.api_key.is_empty(),
+                ws_url_set = !binance_cfg.base_url_ws.is_empty(),
+                "Binance feed skipped (missing api_key or base_url_ws)"
+            );
         }
+    } else {
+        info!("Binance exchange not configured");
     }
 
     if let Some(ref bybit_cfg) = config.exchanges.bybit {
@@ -484,7 +492,15 @@ fn spawn_exchange_feeds(
                 }
             });
             info!("Bybit WebSocket feed spawned");
+        } else {
+            info!(
+                api_key_set = !bybit_cfg.api_key.is_empty(),
+                ws_url_set = !bybit_cfg.base_url_ws.is_empty(),
+                "Bybit feed skipped (missing api_key or base_url_ws)"
+            );
         }
+    } else {
+        info!("Bybit exchange not configured");
     }
 
     if let Some(ref okx_cfg) = config.exchanges.okx {
@@ -504,7 +520,15 @@ fn spawn_exchange_feeds(
                 }
             });
             info!("OKX WebSocket feed spawned");
+        } else {
+            info!(
+                api_key_set = !okx_cfg.api_key.is_empty(),
+                ws_url_set = !okx_cfg.base_url_ws.is_empty(),
+                "OKX feed skipped (missing api_key or base_url_ws)"
+            );
         }
+    } else {
+        info!("OKX exchange not configured");
     }
 
     if let Some(ref kraken_cfg) = config.exchanges.kraken {
@@ -524,7 +548,15 @@ fn spawn_exchange_feeds(
                 }
             });
             info!("Kraken WebSocket feed spawned");
+        } else {
+            info!(
+                api_key_set = !kraken_cfg.api_key.is_empty(),
+                ws_url_set = !kraken_cfg.base_url_ws.is_empty(),
+                "Kraken feed skipped (missing api_key or base_url_ws)"
+            );
         }
+    } else {
+        info!("Kraken exchange not configured");
     }
 }
 

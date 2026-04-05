@@ -713,6 +713,14 @@ function loadConfig() {
         c('cfg-ob-on', cfg.strategy.ob_imbalance.enabled); v('cfg-ob-w',cfg.strategy.ob_imbalance.weight); v('cfg-ob-thresh',cfg.strategy.ob_imbalance.imbalance_threshold); v('cfg-ob-tp',cfg.strategy.ob_imbalance.take_profit_ticks); v('cfg-ob-sl',cfg.strategy.ob_imbalance.stop_loss_ticks);
         c('cfg-liq-on', cfg.strategy.liquidation_wick.enabled); v('cfg-liq-w',cfg.strategy.liquidation_wick.weight); v('cfg-liq-vel',cfg.strategy.liquidation_wick.price_velocity_threshold); v('cfg-liq-vol',cfg.strategy.liquidation_wick.volume_spike_multiplier); v('cfg-liq-tp',cfg.strategy.liquidation_wick.take_profit_pct); v('cfg-liq-sl',cfg.strategy.liquidation_wick.stop_loss_pct);
         c('cfg-fund-on', cfg.strategy.funding_bias.enabled); v('cfg-fund-w',cfg.strategy.funding_bias.weight); v('cfg-fund-thresh',cfg.strategy.funding_bias.funding_threshold); v('cfg-fund-boost',cfg.strategy.funding_bias.strength_boost);
+        // Show status for password fields (browsers don't show dots for programmatic values)
+        const keyStatus = (id) => {
+            const el = document.getElementById(id);
+            if (el) el.placeholder = el.value ? '\u2022\u2022\u2022\u2022 (key set)' : '(not set)';
+        };
+        ['cfg-binance-key','cfg-binance-secret','cfg-bybit-key','cfg-bybit-secret',
+         'cfg-okx-key','cfg-okx-secret','cfg-okx-pass',
+         'cfg-kraken-key','cfg-kraken-secret'].forEach(keyStatus);
         showToast('Config loaded', 'ok');
     }).catch(e => showToast('Failed to load: '+e, 'err'));
 }

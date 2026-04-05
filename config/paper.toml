@@ -1,13 +1,15 @@
 # Paper trading overrides — uses testnet endpoints
+# Note: base_url_ws intentionally left empty for Binance/Bybit to prevent
+# unwanted connections. Only Kraken WS is configured in default.toml.
 [general]
 mode = "paper"
 
 [exchanges.binance]
 base_url_rest = "https://testnet.binancefuture.com"
-base_url_ws = "wss://stream.binancefuture.com"
+base_url_ws = ""
 testnet = true
 
 [exchanges.bybit]
 base_url_rest = "https://api-testnet.bybit.com"
-base_url_ws = "wss://stream-testnet.bybit.com"
+base_url_ws = ""
 testnet = true
