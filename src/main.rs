@@ -29,7 +29,15 @@ mod paper_sim;
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load environment variables from .env file
-    let _ = dotenvy::dotenv();
+    match dotenvy::dotenv() {
+        Ok(path) => {
+            // tracing not initialised yet — use eprintln so it's visible in the terminal
+            eprintln!("[init] .env loaded from {}", path.display());
+        }
+        Err(_) => {
+            eprintln!("[init] No .env file found, using environment variables only");
+        }
+    }
 
     // Initialize tracing
     tracing_subscriber::fmt()
@@ -52,6 +60,15 @@ async fn main() -> Result<()> {
         leverage = config.trading.default_leverage,
         "Configuration loaded"
     );
+
+    // Log resolved exchange key status (without exposing secrets)
+    if let Some(ref k) = config.exchanges.kraken {
+        info!(
+            kraken_api_key_len = k.api_key.len(),
+            kraken_ws_url = %k.base_url_ws,
+            "Kraken config resolved"
+        );
+    }
 
     // Initialize risk manager
     let initial_equity = config.risk.min_equity * 4.0; // Start at 4x min to have room
