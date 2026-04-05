@@ -137,15 +137,24 @@ impl MarketDataFeed for KrakenWsFeed {
 
                     let mut ping_interval = time::interval(Duration::from_secs(30));
 
+                    let mut msg_count: u64 = 0;
+
                     loop {
                         tokio::select! {
                             msg = read.next() => {
                                 match msg {
                                     Some(Ok(Message::Text(text))) => {
+                                        msg_count += 1;
+                                        // Log first 5 messages for diagnostics
+                                        if msg_count <= 5 {
+                                            info!("Kraken WS msg #{}: {}", msg_count, &text[..text.len().min(300)]);
+                                        }
                                         if let Ok(ws_msg) = serde_json::from_str::<WsMessage>(&text) {
                                             if let Some(event) = Self::parse_message(&ws_msg) {
                                                 let _ = tx.send(event);
                                             }
+                                        } else {
+                                            warn!("Kraken WS: failed to parse: {}", &text[..text.len().min(200)]);
                                         }
                                     }
                                     Some(Ok(Message::Ping(data))) => {

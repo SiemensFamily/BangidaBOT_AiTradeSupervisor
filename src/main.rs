@@ -340,12 +340,29 @@ async fn main() -> Result<()> {
         let console_log = console_log.clone();
         let orderbooks = orderbooks.clone();
         let config_symbols = config.trading.symbols.clone();
+        // Build a map of original symbol → mapped aliases so we can check both
+        let mut symbol_aliases: HashMap<String, Vec<String>> = HashMap::new();
+        for cfg in [&config.exchanges.binance, &config.exchanges.bybit, &config.exchanges.kraken] {
+            if let Some(c) = cfg {
+                for (orig, mapped) in &c.symbol_map {
+                    symbol_aliases.entry(orig.clone()).or_default().push(mapped.clone());
+                }
+            }
+        }
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
             loop {
                 interval.tick().await;
                 let obs = orderbooks.lock().await;
-                let active = config_symbols.iter().filter(|s| obs.contains_key(*s)).count();
+                let active = config_symbols
+                    .iter()
+                    .filter(|s| {
+                        obs.contains_key(*s)
+                            || symbol_aliases
+                                .get(*s)
+                                .map_or(false, |aliases| aliases.iter().any(|a| obs.contains_key(a)))
+                    })
+                    .count();
                 drop(obs);
                 console_log.lock().await.push(format!(
                     "Scanning markets... {}/{} symbols active",
@@ -693,9 +710,21 @@ async fn process_market_event(
 
             let mut of = order_flow.lock().await;
             of.on_trade(price_f64, qty_f64, is_buyer_maker);
+            drop(of);
 
             let mut cm = candle_mgr.lock().await;
-            cm.on_trade(&symbol, price_f64, qty_f64, timestamp_ms);
+            let completed = cm.on_trade(&symbol, price_f64, qty_f64, timestamp_ms);
+            drop(cm);
+
+            // Feed completed 1m candles into indicators & regime detector.
+            // This is essential for exchanges like Kraken that don't provide
+            // native kline/candle WebSocket streams.
+            for candle in completed {
+                ind.update_ohlcv(candle.high, candle.low, candle.close, candle.volume);
+                let prev_close = ind.last_close.unwrap_or(candle.close);
+                let mut rd = regime_detector.lock().await;
+                rd.update(candle.high, candle.low, prev_close);
+            }
         }
         MarketEvent::KlineClose {
             high,
