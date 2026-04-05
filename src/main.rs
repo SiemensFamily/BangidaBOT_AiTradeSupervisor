@@ -755,6 +755,33 @@ async fn process_market_event(
             let mut of = order_flow.lock().await;
             of.on_liquidation(qty_f64, timestamp_ms);
         }
+        MarketEvent::MarkPrice {
+            symbol,
+            mark_price,
+            ..
+        } => {
+            // Use mark price updates to feed indicators. Kraken Futures has
+            // infrequent trades but sends ticker/mark-price every second,
+            // which is enough to warm up price-based indicators.
+            let price_f64 = decimal_to_f64(mark_price);
+            let mut ind = indicators.lock().await;
+            ind.update_price(price_f64);
+
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let mut cm = candle_mgr.lock().await;
+            let completed = cm.on_trade(&symbol, price_f64, 0.0, ts);
+            drop(cm);
+
+            for candle in completed {
+                ind.update_ohlcv(candle.high, candle.low, candle.close, candle.volume);
+                let prev_close = ind.last_close.unwrap_or(candle.close);
+                let mut rd = regime_detector.lock().await;
+                rd.update(candle.high, candle.low, prev_close);
+            }
+        }
         _ => {} // OrderUpdate, PositionUpdate, BalanceUpdate handled elsewhere
     }
 }
