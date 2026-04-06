@@ -268,7 +268,7 @@ async fn main() -> Result<()> {
                                     // or at least 5 seconds since last log of same signal
                                     let should_log = match last_logged.get(&key) {
                                         Some((prev_side, prev_ts)) => {
-                                            *prev_side != side_str || now_ms.saturating_sub(*prev_ts) >= 5_000
+                                            *prev_side != side_str || now_ms.saturating_sub(*prev_ts) >= 30_000
                                         }
                                         None => true,
                                     };
@@ -285,18 +285,8 @@ async fn main() -> Result<()> {
                                         last_logged.insert(key, (side_str, now_ms));
                                     }
                                 } else {
-                                    // Strategy stopped firing — log the stop event once
-                                    if last_logged.remove(&key).is_some() {
-                                        if sl.len() >= 200 { sl.pop_front(); }
-                                        sl.push_back(dashboard::SignalRecord {
-                                            timestamp_ms: now_ms,
-                                            symbol: matched_key.clone(),
-                                            strategy: format!("{} (stopped)", vote.name),
-                                            side: String::new(),
-                                            strength: 0.0,
-                                            accepted: false,
-                                        });
-                                    }
+                                    // Strategy stopped — just clear tracking, don't log
+                                    last_logged.remove(&key);
                                 }
                             }
                         }
