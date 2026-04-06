@@ -114,6 +114,9 @@ async fn main() -> Result<()> {
         Arc::new(Mutex::new(Vec::new()));
     let strategy_votes: Arc<Mutex<Vec<StrategyVote>>> =
         Arc::new(Mutex::new(Vec::new()));
+    let last_funding_rate: Arc<Mutex<f64>> = Arc::new(Mutex::new(0.0));
+    let price_history: Arc<Mutex<VecDeque<(u64, f64)>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
 
     // Log startup
     {
@@ -133,6 +136,8 @@ async fn main() -> Result<()> {
         let candle_mgr = candle_mgr.clone();
         let order_flow = order_flow.clone();
         let regime_detector = regime_detector.clone();
+        let last_funding_rate = last_funding_rate.clone();
+        let price_history = price_history.clone();
 
         tokio::spawn(async move {
             info!("Data aggregator task started");
@@ -146,6 +151,8 @@ async fn main() -> Result<()> {
                             &candle_mgr,
                             &order_flow,
                             &regime_detector,
+                            &last_funding_rate,
+                            &price_history,
                         )
                         .await;
                     }
@@ -170,6 +177,9 @@ async fn main() -> Result<()> {
         let order_flow = order_flow.clone();
         let regime_detector = regime_detector.clone();
         let strategy_votes = strategy_votes.clone();
+        let last_funding_rate = last_funding_rate.clone();
+        let price_history = price_history.clone();
+        let signal_log = signal_log.clone();
         // Build map of config symbol → all possible orderbook keys (including mapped names)
         let mut symbol_lookup: HashMap<String, Vec<String>> = HashMap::new();
         for s in &symbols {
@@ -194,6 +204,7 @@ async fn main() -> Result<()> {
                     // Try config symbol first, then mapped aliases
                     let candidates = symbol_lookup.get(symbol.as_str()).cloned().unwrap_or_else(|| vec![symbol.clone()]);
                     let mut ctx_opt = None;
+                    let mut matched_key = symbol.clone();
                     for key in &candidates {
                         ctx_opt = build_market_context(
                             key,
@@ -202,15 +213,40 @@ async fn main() -> Result<()> {
                             &candle_mgr,
                             &order_flow,
                             &regime_detector,
+                            &last_funding_rate,
+                            &price_history,
                         )
                         .await;
                         if ctx_opt.is_some() {
+                            matched_key = key.clone();
                             break;
                         }
                     }
 
                     if let Some(ctx) = ctx_opt {
                         let result = ensemble.evaluate_detailed(&ctx);
+
+                        // Log individual strategy votes to Analyst Log
+                        let now_ms = ctx.timestamp_ms;
+                        {
+                            let mut sl = signal_log.lock().await;
+                            for vote in &result.votes {
+                                if vote.fired {
+                                    if sl.len() >= 200 {
+                                        sl.pop_front();
+                                    }
+                                    sl.push_back(dashboard::SignalRecord {
+                                        timestamp_ms: now_ms,
+                                        symbol: matched_key.clone(),
+                                        strategy: vote.name.clone(),
+                                        side: vote.side.map(|s| format!("{:?}", s)).unwrap_or_default(),
+                                        strength: vote.strength,
+                                        accepted: false, // individual vote
+                                    });
+                                }
+                            }
+                        }
+
                         *strategy_votes.lock().await = result.votes;
                         if let Some(signal) = result.signal {
                             if signal_tx.send(signal).await.is_err() {
@@ -708,6 +744,8 @@ async fn process_market_event(
     candle_mgr: &Mutex<CandleManager>,
     order_flow: &Mutex<OrderFlowTracker>,
     regime_detector: &Mutex<RegimeDetector>,
+    last_funding_rate: &Mutex<f64>,
+    price_history: &Mutex<VecDeque<(u64, f64)>>,
 ) {
     match event {
         MarketEvent::OrderBookUpdate {
@@ -786,6 +824,7 @@ async fn process_market_event(
         MarketEvent::MarkPrice {
             symbol,
             mark_price,
+            funding_rate,
             ..
         } => {
             // Use mark price updates to feed indicators. Kraken Futures has
@@ -795,10 +834,26 @@ async fn process_market_event(
             let mut ind = indicators.lock().await;
             ind.update_price(price_f64);
 
+            // Extract funding rate from MarkPrice events
+            let fr = decimal_to_f64(funding_rate);
+            if fr.abs() > 1e-12 {
+                *last_funding_rate.lock().await = fr;
+            }
+
+            // Track price history for velocity calculation
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
+            {
+                let mut ph = price_history.lock().await;
+                ph.push_back((ts, price_f64));
+                // Trim entries older than 60 seconds
+                let cutoff = ts.saturating_sub(60_000);
+                while ph.front().map_or(false, |(t, _)| *t < cutoff) {
+                    ph.pop_front();
+                }
+            }
             let mut cm = candle_mgr.lock().await;
             let completed = cm.on_trade(&symbol, price_f64, 0.0, ts);
             drop(cm);
@@ -822,6 +877,8 @@ async fn build_market_context(
     candle_mgr: &Mutex<CandleManager>,
     order_flow: &Mutex<OrderFlowTracker>,
     regime_detector: &Mutex<RegimeDetector>,
+    last_funding_rate: &Mutex<f64>,
+    price_history: &Mutex<VecDeque<(u64, f64)>>,
 ) -> Option<MarketContext> {
     let obs = orderbooks.lock().await;
     let ob = obs.get(symbol)?;
@@ -855,8 +912,33 @@ async fn build_market_context(
         .map(|b| b.bands())
         .unwrap_or((0.0, 0.0, 0.0));
 
-    let highest = cm.highest_high(symbol, "1m", 60).unwrap_or(0.0);
-    let lowest = cm.lowest_low(symbol, "1m", 60).unwrap_or(0.0);
+    // Fallback to current price when candle history is empty
+    let mid_f64 = decimal_to_f64(mid);
+    let highest = cm.highest_high(symbol, "1m", 60).unwrap_or(mid_f64);
+    let lowest = cm.lowest_low(symbol, "1m", 60).unwrap_or(mid_f64);
+
+    // Calculate price velocity from price history
+    let price_velocity_30s = {
+        let ph = price_history.lock().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let target = now.saturating_sub(30_000);
+        // Find the oldest entry within the 30s window
+        if let Some((_, old_price)) = ph.iter().find(|(t, _)| *t >= target) {
+            if *old_price > 0.0 {
+                (mid_f64 - old_price) / old_price * 100.0
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        }
+    };
+
+    // Use real funding rate from MarkPrice events
+    let funding = *last_funding_rate.lock().await;
 
     // Determine multi-timeframe trends from EMA slope
     let tf_5m_trend = if ema9_val > ema21_val {
@@ -896,12 +978,12 @@ async fn build_market_context(
         volatility_regime: rd.regime(),
         highest_high_60s: highest,
         lowest_low_60s: lowest,
-        avg_volume_60s: 100.0,   // simplified
+        avg_volume_60s: 100.0,   // simplified — MarkPrice qty=0 so real volume not available yet
         current_volume: 100.0,   // simplified
-        funding_rate: 0.001,     // filled from MarkPrice events
-        funding_rate_secondary: 0.001,
+        funding_rate: funding,
+        funding_rate_secondary: funding,
         open_interest: None,
-        price_velocity_30s: 0.0, // simplified
+        price_velocity_30s,
         timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
     })
 }
