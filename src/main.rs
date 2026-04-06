@@ -21,6 +21,7 @@ use scalper_strategy::{
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{error, info, warn};
 
@@ -360,6 +361,7 @@ async fn main() -> Result<()> {
     {
         let executor = executor.clone();
         let order_tracker = order_tracker.clone();
+        let order_seq = Arc::new(AtomicU64::new(0));
 
         tokio::spawn(async move {
             info!("Executor task started");
@@ -383,8 +385,9 @@ async fn main() -> Result<()> {
 
                 // In live mode, this would call exchange.place_order(...)
                 // For now, track the order in the order tracker
+                let seq = order_seq.fetch_add(1, Ordering::SeqCst);
                 let managed = scalper_execution::order_tracker::ManagedOrder {
-                    order_id: format!("sim-{}", validated.signal.timestamp_ms),
+                    order_id: format!("sim-{}-{}", validated.signal.timestamp_ms, seq),
                     symbol: prepared.symbol.clone(),
                     exchange: prepared.exchange,
                     side: prepared.side,

@@ -3,6 +3,8 @@
 //! Periodically checks open orders against live market data and simulates fills.
 //! Market orders fill immediately at best bid/ask with slippage.
 //! Limit orders fill when the market price crosses the limit price.
+//!
+//! Tracks open positions per symbol so that an opposing-side fill realizes PnL.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,6 +22,14 @@ const SLIPPAGE_BPS: f64 = 2.0;
 const TAKER_FEE_BPS: f64 = 4.0;
 const MAKER_FEE_BPS: f64 = 2.0;
 
+/// An open paper position for a symbol.
+#[derive(Debug, Clone)]
+struct OpenPosition {
+    side: Side,
+    avg_price: Decimal,
+    quantity: Decimal,
+}
+
 pub async fn run_paper_sim(
     order_tracker: Arc<OrderTracker>,
     orderbooks: Arc<Mutex<HashMap<String, OrderBook>>>,
@@ -28,6 +38,8 @@ pub async fn run_paper_sim(
     console_log: Arc<Mutex<ConsoleLog>>,
 ) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
+    // Per-symbol open positions for realized PnL tracking
+    let mut positions: HashMap<String, OpenPosition> = HashMap::new();
 
     loop {
         interval.tick().await;
@@ -109,14 +121,46 @@ pub async fn run_paper_sim(
                 let notional = fill_price * qty;
                 let fees = notional * fee_rate;
                 let now_ms = chrono::Utc::now().timestamp_millis() as u64;
-
-                // Compute PnL: for paper mode, entry is the order price, fill is market
-                // For a buy: PnL is 0 at fill (position opened), realized when closed
-                // Since we're simulating single fills, PnL = 0 for opening trades
-                // The PnL tracking happens when the position is eventually closed
-                // For simplicity: record the fill, PnL = 0 for now (position open)
-                let pnl = 0.0;
                 let fees_f64 = fees.to_f64().unwrap_or(0.0);
+
+                // Realized PnL via position tracking. If there's an open
+                // position on the same symbol with the OPPOSITE side, this
+                // fill closes (or partially closes) it. Otherwise, open or
+                // add to a same-side position.
+                let pnl = match positions.get_mut(&order.symbol) {
+                    Some(pos) if pos.side != order.side => {
+                        // Closing trade — compute realized PnL on the matched qty
+                        let close_qty = qty.min(pos.quantity);
+                        let pnl_dec = match pos.side {
+                            Side::Buy => (fill_price - pos.avg_price) * close_qty,
+                            Side::Sell => (pos.avg_price - fill_price) * close_qty,
+                        };
+                        pos.quantity -= close_qty;
+                        let pnl_f64 = pnl_dec.to_f64().unwrap_or(0.0);
+                        if pos.quantity <= Decimal::ZERO {
+                            positions.remove(&order.symbol);
+                        }
+                        pnl_f64
+                    }
+                    Some(pos) => {
+                        // Same side — average into the position
+                        let total_qty = pos.quantity + qty;
+                        if total_qty > Decimal::ZERO {
+                            pos.avg_price = (pos.avg_price * pos.quantity + fill_price * qty) / total_qty;
+                            pos.quantity = total_qty;
+                        }
+                        0.0
+                    }
+                    None => {
+                        // New position
+                        positions.insert(order.symbol.clone(), OpenPosition {
+                            side: order.side,
+                            avg_price: fill_price,
+                            quantity: qty,
+                        });
+                        0.0
+                    }
+                };
 
                 // Update order tracker
                 order_tracker.update(
