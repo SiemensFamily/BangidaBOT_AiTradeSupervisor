@@ -198,6 +198,8 @@ async fn main() -> Result<()> {
             info!("Strategy engine task started");
             let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
             let mut diag_counter: u64 = 0;
+            // Track last logged state per (strategy, symbol) to deduplicate
+            let mut last_logged: HashMap<(String, String), (String, u64)> = HashMap::new();
             loop {
                 interval.tick().await;
                 diag_counter += 1;
@@ -253,23 +255,48 @@ async fn main() -> Result<()> {
 
                         let result = ensemble.evaluate_detailed(&ctx);
 
-                        // Log individual strategy votes to Analyst Log
+                        // Log individual strategy votes to Analyst Log (deduplicated)
                         let now_ms = ctx.timestamp_ms;
                         {
                             let mut sl = signal_log.lock().await;
                             for vote in &result.votes {
+                                let key = (vote.name.clone(), matched_key.clone());
+                                let side_str = vote.side.map(|s| format!("{:?}", s)).unwrap_or_default();
+
                                 if vote.fired {
-                                    if sl.len() >= 200 {
-                                        sl.pop_front();
+                                    // Only log if this is a new signal or changed direction,
+                                    // or at least 5 seconds since last log of same signal
+                                    let should_log = match last_logged.get(&key) {
+                                        Some((prev_side, prev_ts)) => {
+                                            *prev_side != side_str || now_ms.saturating_sub(*prev_ts) >= 5_000
+                                        }
+                                        None => true,
+                                    };
+                                    if should_log {
+                                        if sl.len() >= 200 { sl.pop_front(); }
+                                        sl.push_back(dashboard::SignalRecord {
+                                            timestamp_ms: now_ms,
+                                            symbol: matched_key.clone(),
+                                            strategy: vote.name.clone(),
+                                            side: side_str.clone(),
+                                            strength: vote.strength,
+                                            accepted: false,
+                                        });
+                                        last_logged.insert(key, (side_str, now_ms));
                                     }
-                                    sl.push_back(dashboard::SignalRecord {
-                                        timestamp_ms: now_ms,
-                                        symbol: matched_key.clone(),
-                                        strategy: vote.name.clone(),
-                                        side: vote.side.map(|s| format!("{:?}", s)).unwrap_or_default(),
-                                        strength: vote.strength,
-                                        accepted: false, // individual vote
-                                    });
+                                } else {
+                                    // Strategy stopped firing — log the stop event once
+                                    if last_logged.remove(&key).is_some() {
+                                        if sl.len() >= 200 { sl.pop_front(); }
+                                        sl.push_back(dashboard::SignalRecord {
+                                            timestamp_ms: now_ms,
+                                            symbol: matched_key.clone(),
+                                            strategy: format!("{} (stopped)", vote.name),
+                                            side: String::new(),
+                                            strength: 0.0,
+                                            accepted: false,
+                                        });
+                                    }
                                 }
                             }
                         }
