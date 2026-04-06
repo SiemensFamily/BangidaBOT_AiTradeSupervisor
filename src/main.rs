@@ -834,6 +834,14 @@ async fn process_market_event(
             let mut ind = indicators.lock().await;
             ind.update_price(price_f64);
 
+            // Feed synthetic order flow from price direction so CVD is non-zero.
+            // Without this, OB Imbalance can never fire (needs cvd != 0).
+            {
+                let is_seller = price_f64 < ind.last_close.unwrap_or(price_f64);
+                let mut of = order_flow.lock().await;
+                of.on_trade(price_f64, 1.0, is_seller);
+            }
+
             // Extract funding rate from MarkPrice events
             let fr = decimal_to_f64(funding_rate);
             if fr.abs() > 1e-12 {
