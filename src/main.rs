@@ -235,13 +235,13 @@ async fn main() -> Result<()> {
                                 symbol: matched_key.clone(),
                                 strategy: "DIAG".to_string(),
                                 side: format!(
-                                    "hi60={:.0} lo60={:.0} price={:.0} cvd={:.1} vol_r={:.2} imb={:.2} rsi={:.0} fr={:.5} pv30={:.3}",
+                                    "hi60={:.0} lo60={:.0} price={:.0} cvd={:.1} imb={:.2} sprd={} rsi={:.0} fr={:.5} pv30={:.3}",
                                     ctx.highest_high_60s,
                                     ctx.lowest_low_60s,
                                     decimal_to_f64(ctx.last_price),
                                     ctx.cvd,
-                                    ctx.volume_ratio,
                                     ctx.imbalance_ratio,
+                                    ctx.spread,
                                     ctx.rsi_14,
                                     ctx.funding_rate,
                                     ctx.price_velocity_30s,
@@ -1003,7 +1003,10 @@ async fn build_market_context(
         best_bid,
         best_ask,
         spread,
-        tick_size: rust_decimal_macros::dec!(0.1),
+        // Use exchange-appropriate tick size. Kraken Futures PI_XBTUSD
+        // has $0.50 tick, PI_ETHUSD has $0.05. Use spread-based heuristic
+        // as fallback: tick_size ≈ spread so the spread guard stays meaningful.
+        tick_size: spread,
         imbalance_ratio: imbalance,
         bid_depth_10: ob.bid_depth(10),
         ask_depth_10: ob.ask_depth(10),
