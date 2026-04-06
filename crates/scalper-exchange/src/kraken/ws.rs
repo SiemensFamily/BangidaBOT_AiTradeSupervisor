@@ -31,7 +31,8 @@ impl KrakenWsFeed {
         let symbol = msg.product_id.clone()?;
 
         match feed {
-            "book" | "book_snapshot" => {
+            "book_snapshot" => {
+                // Full snapshot: bids and asks arrays
                 let bids: Vec<(Decimal, Decimal)> = msg
                     .bids
                     .as_ref()?
@@ -54,6 +55,24 @@ impl KrakenWsFeed {
                         )
                     })
                     .collect();
+                Some(MarketEvent::OrderBookUpdate {
+                    exchange: Exchange::Kraken,
+                    symbol,
+                    bids,
+                    asks,
+                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                })
+            }
+            "book" => {
+                // Incremental update: single level with side/price/qty
+                let price = Decimal::from_f64_retain(msg.price?).unwrap_or_default();
+                let qty = Decimal::from_f64_retain(msg.qty?).unwrap_or_default();
+                let side = msg.side.as_deref()?;
+                let (bids, asks) = match side {
+                    "buy" => (vec![(price, qty)], vec![]),
+                    "sell" => (vec![], vec![(price, qty)]),
+                    _ => return None,
+                };
                 Some(MarketEvent::OrderBookUpdate {
                     exchange: Exchange::Kraken,
                     symbol,
