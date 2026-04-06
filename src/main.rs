@@ -863,12 +863,14 @@ async fn process_market_event(
             // which is enough to warm up price-based indicators.
             let price_f64 = decimal_to_f64(mark_price);
             let mut ind = indicators.lock().await;
+
+            // Capture previous price BEFORE updating, for order flow direction
+            let prev_price = ind.last_close.unwrap_or(price_f64);
             ind.update_price(price_f64);
 
             // Feed synthetic order flow from price direction so CVD is non-zero.
-            // Without this, OB Imbalance can never fire (needs cvd != 0).
             {
-                let is_seller = price_f64 < ind.last_close.unwrap_or(price_f64);
+                let is_seller = price_f64 < prev_price;
                 let mut of = order_flow.lock().await;
                 of.on_trade(price_f64, 1.0, is_seller);
             }
