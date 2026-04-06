@@ -30,15 +30,19 @@ impl PositionSizer {
 
     /// Volatility-adjusted position sizing.
     ///
-    /// Scales position size inversely with ATR. Returns quantity in units
-    /// (notional / price).
+    /// Scales position size inversely with ATR. Returns quantity in units.
+    ///
+    /// ATR is in price units (e.g. $30 for BTC). The risk_amount divided by
+    /// ATR gives quantity directly: risking $3 at $30/unit volatility = 0.1 unit.
+    /// The `price` parameter is kept for API compatibility / future use.
     pub fn volatility_adjusted(equity: f64, risk_pct: f64, atr: f64, price: f64) -> f64 {
         if atr <= 0.0 || price <= 0.0 {
             return 0.0;
         }
         let risk_amount = equity * risk_pct / 100.0;
-        let notional = risk_amount / atr;
-        notional / price
+        // quantity = risk_amount / (stop_distance_in_price)
+        // Using ATR as stop distance proxy.
+        risk_amount / atr
     }
 
     /// Apply exchange minimum notional check.
@@ -112,10 +116,11 @@ mod tests {
 
     #[test]
     fn test_volatility_adjusted_basic() {
-        // equity=10000, risk 1%, atr=50, price=1000
-        // risk_amount = 100, notional = 100/50 = 2, units = 2/1000 = 0.002
+        // equity=10000, risk 1%, atr=50 (price units)
+        // risk_amount = $100, quantity = $100 / $50 = 2 units
+        // (Risking $100 when each unit moves $50 = 2 units exposure)
         let qty = PositionSizer::volatility_adjusted(10000.0, 1.0, 50.0, 1000.0);
-        assert!((qty - 0.002).abs() < 1e-9);
+        assert!((qty - 2.0).abs() < 1e-9);
     }
 
     #[test]
