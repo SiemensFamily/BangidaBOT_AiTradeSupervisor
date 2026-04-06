@@ -1047,8 +1047,8 @@ async fn build_market_context(
         volatility_regime: rd.regime(),
         highest_high_60s: highest,
         lowest_low_60s: lowest,
-        avg_volume_60s: 100.0,   // simplified — MarkPrice qty=0 so real volume not available yet
-        current_volume: 100.0,   // simplified
+        avg_volume_60s: of.avg_volume_60s().max(1.0),
+        current_volume: of.current_volume(),
         funding_rate: funding,
         funding_rate_secondary: funding,
         open_interest: None,

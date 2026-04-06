@@ -66,6 +66,20 @@ impl OrderFlowTracker {
         self.cvd_short
     }
 
+    /// Total volume in the current accumulating minute (buy + sell).
+    pub fn current_volume(&self) -> f64 {
+        self.current_buy_vol + self.current_sell_vol
+    }
+
+    /// Average per-minute total volume over the historical window.
+    /// Returns 0.0 if no history.
+    pub fn avg_volume_60s(&self) -> f64 {
+        let total: f64 = self.buy_volume_1m.iter().sum::<f64>()
+            + self.sell_volume_1m.iter().sum::<f64>();
+        let count = self.buy_volume_1m.len();
+        if count == 0 { 0.0 } else { total / count as f64 }
+    }
+
     /// Buy volume / sell volume ratio over the sampled window.
     /// Returns f64::INFINITY if no sell volume, 0.0 if no data.
     pub fn volume_ratio(&self) -> f64 {

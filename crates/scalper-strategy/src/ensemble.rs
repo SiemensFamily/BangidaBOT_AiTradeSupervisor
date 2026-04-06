@@ -140,9 +140,13 @@ impl EnsembleStrategy {
             (sell_signals, Side::Sell)
         };
 
-        // Require minimum 2 strategies agreeing (unless only 1 strategy enabled)
+        // Require minimum 2 strategies agreeing — UNLESS a solo signal has
+        // very high conviction (>= 0.5 strength). This allows the bot to act
+        // on strong single-strategy signals when other strategies aren't firing.
         let total_enabled = self.strategies.len();
-        if total_enabled > 1 && chosen_signals.len() < 2 {
+        let solo_high_conviction = chosen_signals.len() == 1
+            && chosen_signals[0].0.strength >= 0.5;
+        if total_enabled > 1 && chosen_signals.len() < 2 && !solo_high_conviction {
             return EvalResult { signal: None, votes };
         }
 
@@ -291,14 +295,28 @@ mod tests {
     }
 
     #[test]
-    fn no_signal_without_consensus() {
+    fn no_signal_without_consensus_low_strength() {
+        // Low-strength solo signal: should be rejected (needs 2 strategies)
         let strategies: Vec<Box<dyn Strategy>> = vec![
-            Box::new(MockStrategy { name: "a".into(), weight: 0.40, signal: Some(make_signal(Side::Buy, 0.7)) }),
+            Box::new(MockStrategy { name: "a".into(), weight: 0.40, signal: Some(make_signal(Side::Buy, 0.3)) }),
             Box::new(MockStrategy { name: "b".into(), weight: 0.25, signal: None }),
         ];
         let ensemble = EnsembleStrategy::new(strategies, 0.20);
         let signal = ensemble.evaluate(&base_ctx());
-        assert!(signal.is_none()); // only 1 strategy agrees, need 2
+        assert!(signal.is_none());
+    }
+
+    #[test]
+    fn solo_high_conviction_passes() {
+        // Solo signal with strength >= 0.5 should pass even without consensus
+        let strategies: Vec<Box<dyn Strategy>> = vec![
+            Box::new(MockStrategy { name: "a".into(), weight: 0.40, signal: Some(make_signal(Side::Buy, 0.8)) }),
+            Box::new(MockStrategy { name: "b".into(), weight: 0.25, signal: None }),
+        ];
+        let ensemble = EnsembleStrategy::new(strategies, 0.20);
+        let signal = ensemble.evaluate(&base_ctx());
+        assert!(signal.is_some());
+        assert_eq!(signal.unwrap().side, Side::Buy);
     }
 
     #[test]
