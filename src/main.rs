@@ -362,16 +362,57 @@ async fn main() -> Result<()> {
         let executor = executor.clone();
         let order_tracker = order_tracker.clone();
         let order_seq = Arc::new(AtomicU64::new(0));
+        let orderbooks = orderbooks.clone();
+        let console_log = console_log.clone();
+        // Build map of config symbol → mapped aliases (same as strategy engine)
+        let mut symbol_lookup: HashMap<String, Vec<String>> = HashMap::new();
+        for s in &config.trading.symbols {
+            let mut keys = vec![s.clone()];
+            for cfg in [&config.exchanges.binance, &config.exchanges.bybit, &config.exchanges.kraken] {
+                if let Some(c) = cfg {
+                    if let Some(mapped) = c.symbol_map.get(s) {
+                        keys.push(mapped.clone());
+                    }
+                }
+            }
+            symbol_lookup.insert(s.clone(), keys);
+        }
 
         tokio::spawn(async move {
             info!("Executor task started");
             while let Some(validated) = order_rx.recv().await {
                 let exec = executor.lock().await;
 
-                // Prepare the order
-                let best_bid = validated.signal.stop_loss.unwrap_or_default();
-                let best_ask = validated.signal.take_profit.unwrap_or_default();
-                let tick_size = rust_decimal_macros::dec!(0.1);
+                // Look up REAL best_bid/best_ask from the orderbook (not stop_loss/take_profit!)
+                let candidates = symbol_lookup
+                    .get(&validated.signal.symbol)
+                    .cloned()
+                    .unwrap_or_else(|| vec![validated.signal.symbol.clone()]);
+                let (best_bid, best_ask) = {
+                    let obs = orderbooks.lock().await;
+                    let mut bb = rust_decimal_macros::dec!(0);
+                    let mut ba = rust_decimal_macros::dec!(0);
+                    for key in &candidates {
+                        if let Some(ob) = obs.get(key) {
+                            if let (Some((b, _)), Some((a, _))) = (ob.best_bid(), ob.best_ask()) {
+                                bb = b;
+                                ba = a;
+                                break;
+                            }
+                        }
+                    }
+                    (bb, ba)
+                };
+
+                if best_bid <= rust_decimal_macros::dec!(0) || best_ask <= rust_decimal_macros::dec!(0) {
+                    console_log.lock().await.push(format!(
+                        "Order skipped: no valid bid/ask for {}",
+                        validated.signal.symbol
+                    ));
+                    continue;
+                }
+
+                let tick_size = (best_ask - best_bid).max(rust_decimal_macros::dec!(0.01));
 
                 let prepared = exec.prepare_order(&validated, best_bid, best_ask, tick_size);
 
@@ -917,7 +958,9 @@ async fn process_market_event(
                 }
             }
             let mut cm = candle_mgr.lock().await;
-            let completed = cm.on_trade(&symbol, price_f64, 0.0, ts);
+            // Use synthetic volume of 1.0 so VWAP/OBV can warm up
+            // (Kraken sends few real trades, so candles would otherwise have volume=0)
+            let completed = cm.on_trade(&symbol, price_f64, 1.0, ts);
             drop(cm);
 
             if !completed.is_empty() {
