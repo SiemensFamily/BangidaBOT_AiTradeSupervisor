@@ -220,6 +220,8 @@ pub async fn start_dashboard(state: DashboardState) {
         .route("/ws", get(ws_handler))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/trades.csv", get(get_trades_csv))
+        .route("/api/signals.csv", get(get_signals_csv))
+        .route("/api/console.csv", get(get_console_csv))
         .route("/api/debug", get(get_debug))
         .with_state(state);
 
@@ -294,6 +296,36 @@ async fn get_trades_csv(State(state): State<DashboardState>) -> impl IntoRespons
     }
     (
         [(header::CONTENT_TYPE, "text/csv"), (header::CONTENT_DISPOSITION, "attachment; filename=\"trades.csv\"")],
+        csv,
+    )
+}
+
+async fn get_signals_csv(State(state): State<DashboardState>) -> impl IntoResponse {
+    let signals = state.signal_log.lock().await;
+    let mut csv = String::from("timestamp,symbol,strategy,side,strength,accepted\n");
+    for s in signals.iter() {
+        csv.push_str(&format!(
+            "{},{},{},\"{}\",{:.4},{}\n",
+            s.timestamp_ms, s.symbol, s.strategy, s.side, s.strength, s.accepted
+        ));
+    }
+    (
+        [(header::CONTENT_TYPE, "text/csv"), (header::CONTENT_DISPOSITION, "attachment; filename=\"signals.csv\"")],
+        csv,
+    )
+}
+
+async fn get_console_csv(State(state): State<DashboardState>) -> impl IntoResponse {
+    let log = state.console_log.lock().await;
+    let mut csv = String::from("timestamp,message\n");
+    for e in log.entries() {
+        csv.push_str(&format!(
+            "{},\"{}\"\n",
+            e.timestamp_ms, e.message.replace('"', "\"\"")
+        ));
+    }
+    (
+        [(header::CONTENT_TYPE, "text/csv"), (header::CONTENT_DISPOSITION, "attachment; filename=\"console.csv\"")],
         csv,
     )
 }
