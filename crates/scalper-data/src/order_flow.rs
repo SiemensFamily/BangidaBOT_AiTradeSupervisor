@@ -4,6 +4,8 @@ use crate::ringbuffer::RingBuffer;
 #[derive(Debug, Clone)]
 pub struct OrderFlowTracker {
     cvd: f64,
+    /// Short-window CVD that resets each minute for directional checks.
+    cvd_short: f64,
     buy_volume_1m: RingBuffer<f64>,
     sell_volume_1m: RingBuffer<f64>,
     current_buy_vol: f64,
@@ -16,6 +18,7 @@ impl OrderFlowTracker {
     pub fn new() -> Self {
         Self {
             cvd: 0.0,
+            cvd_short: 0.0,
             buy_volume_1m: RingBuffer::new(60),  // keep 60 samples
             sell_volume_1m: RingBuffer::new(60),
             current_buy_vol: 0.0,
@@ -32,10 +35,12 @@ impl OrderFlowTracker {
         if is_buyer_maker {
             // Aggressive sell
             self.cvd -= qty;
+            self.cvd_short -= qty;
             self.current_sell_vol += qty;
         } else {
             // Aggressive buy
             self.cvd += qty;
+            self.cvd_short += qty;
             self.current_buy_vol += qty;
         }
     }
@@ -50,9 +55,15 @@ impl OrderFlowTracker {
         self.liquidation_volume_1m += qty;
     }
 
-    /// Cumulative Volume Delta.
+    /// Cumulative Volume Delta (all-time).
     pub fn cvd(&self) -> f64 {
         self.cvd
+    }
+
+    /// Short-window CVD (resets each minute). Better for directional
+    /// confirmation since all-time CVD can drift far from zero.
+    pub fn cvd_short(&self) -> f64 {
+        self.cvd_short
     }
 
     /// Buy volume / sell volume ratio over the sampled window.
@@ -80,6 +91,7 @@ impl OrderFlowTracker {
         self.sell_volume_1m.push(self.current_sell_vol);
         self.current_buy_vol = 0.0;
         self.current_sell_vol = 0.0;
+        self.cvd_short = 0.0;
 
         // Reset liquidation if more than 60s
         if now_ms.saturating_sub(self.last_liquidation_reset_ms) >= 60_000 {

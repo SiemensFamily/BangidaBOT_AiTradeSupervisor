@@ -115,8 +115,8 @@ async fn main() -> Result<()> {
     let strategy_votes: Arc<Mutex<Vec<StrategyVote>>> =
         Arc::new(Mutex::new(Vec::new()));
     let last_funding_rate: Arc<Mutex<f64>> = Arc::new(Mutex::new(0.0));
-    let price_history: Arc<Mutex<VecDeque<(u64, f64)>>> =
-        Arc::new(Mutex::new(VecDeque::new()));
+    let price_history: Arc<Mutex<HashMap<String, VecDeque<(u64, f64)>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     // Log startup
     {
@@ -772,7 +772,7 @@ async fn process_market_event(
     order_flow: &Mutex<OrderFlowTracker>,
     regime_detector: &Mutex<RegimeDetector>,
     last_funding_rate: &Mutex<f64>,
-    price_history: &Mutex<VecDeque<(u64, f64)>>,
+    price_history: &Mutex<HashMap<String, VecDeque<(u64, f64)>>>,
 ) {
     match event {
         MarketEvent::OrderBookUpdate {
@@ -813,6 +813,10 @@ async fn process_market_event(
             // Feed completed 1m candles into indicators & regime detector.
             // This is essential for exchanges like Kraken that don't provide
             // native kline/candle WebSocket streams.
+            if !completed.is_empty() {
+                let mut of = order_flow.lock().await;
+                of.reset_minute(timestamp_ms);
+            }
             for candle in completed {
                 ind.update_ohlcv(candle.high, candle.low, candle.close, candle.volume);
                 let prev_close = ind.last_close.unwrap_or(candle.close);
@@ -882,17 +886,22 @@ async fn process_market_event(
                 .unwrap_or(0);
             {
                 let mut ph = price_history.lock().await;
-                ph.push_back((ts, price_f64));
+                let entry = ph.entry(symbol.clone()).or_insert_with(VecDeque::new);
+                entry.push_back((ts, price_f64));
                 // Trim entries older than 60 seconds
                 let cutoff = ts.saturating_sub(60_000);
-                while ph.front().map_or(false, |(t, _)| *t < cutoff) {
-                    ph.pop_front();
+                while entry.front().map_or(false, |(t, _)| *t < cutoff) {
+                    entry.pop_front();
                 }
             }
             let mut cm = candle_mgr.lock().await;
             let completed = cm.on_trade(&symbol, price_f64, 0.0, ts);
             drop(cm);
 
+            if !completed.is_empty() {
+                let mut of = order_flow.lock().await;
+                of.reset_minute(ts);
+            }
             for candle in completed {
                 ind.update_ohlcv(candle.high, candle.low, candle.close, candle.volume);
                 let prev_close = ind.last_close.unwrap_or(candle.close);
@@ -913,7 +922,7 @@ async fn build_market_context(
     order_flow: &Mutex<OrderFlowTracker>,
     regime_detector: &Mutex<RegimeDetector>,
     last_funding_rate: &Mutex<f64>,
-    price_history: &Mutex<VecDeque<(u64, f64)>>,
+    price_history: &Mutex<HashMap<String, VecDeque<(u64, f64)>>>,
 ) -> Option<MarketContext> {
     let obs = orderbooks.lock().await;
     let ob = obs.get(symbol)?;
@@ -952,18 +961,21 @@ async fn build_market_context(
     let highest = cm.highest_high(symbol, "1m", 60).unwrap_or(mid_f64);
     let lowest = cm.lowest_low(symbol, "1m", 60).unwrap_or(mid_f64);
 
-    // Calculate price velocity from price history
+    // Calculate price velocity from per-symbol price history
     let price_velocity_30s = {
         let ph = price_history.lock().await;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let target = now.saturating_sub(30_000);
-        // Find the oldest entry within the 30s window
-        if let Some((_, old_price)) = ph.iter().find(|(t, _)| *t >= target) {
-            if *old_price > 0.0 {
-                (mid_f64 - old_price) / old_price * 100.0
+        if let Some(sym_history) = ph.get(symbol) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let target = now.saturating_sub(30_000);
+            if let Some((_, old_price)) = sym_history.iter().find(|(t, _)| *t >= target) {
+                if *old_price > 0.0 {
+                    (mid_f64 - old_price) / old_price * 100.0
+                } else {
+                    0.0
+                }
             } else {
                 0.0
             }
@@ -1005,7 +1017,7 @@ async fn build_market_context(
         vwap: vwap_val,
         atr_14: atr_val,
         obv: obv_val,
-        cvd: of.cvd(),
+        cvd: of.cvd_short(),
         volume_ratio: of.volume_ratio(),
         liquidation_volume_1m: of.liquidation_volume_1m(),
         tf_5m_trend,
