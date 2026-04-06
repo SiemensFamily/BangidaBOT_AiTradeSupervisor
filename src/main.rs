@@ -285,8 +285,8 @@ async fn main() -> Result<()> {
                                         last_logged.insert(key, (side_str, now_ms));
                                     }
                                 } else {
-                                    // Strategy stopped — just clear tracking, don't log
-                                    last_logged.remove(&key);
+                                    // Strategy stopped — keep last_logged so the 30s
+                                    // dedup window still suppresses rapid re-fires
                                 }
                             }
                         }
