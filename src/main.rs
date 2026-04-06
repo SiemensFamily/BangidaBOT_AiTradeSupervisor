@@ -197,8 +197,10 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             info!("Strategy engine task started");
             let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
+            let mut diag_counter: u64 = 0;
             loop {
                 interval.tick().await;
+                diag_counter += 1;
 
                 for symbol in &symbols {
                     // Try config symbol first, then mapped aliases
@@ -224,6 +226,31 @@ async fn main() -> Result<()> {
                     }
 
                     if let Some(ctx) = ctx_opt {
+                        // Periodic diagnostic dump every 30s (300 ticks at 100ms)
+                        if diag_counter % 300 == 1 {
+                            let mut sl = signal_log.lock().await;
+                            if sl.len() >= 200 { sl.pop_front(); }
+                            sl.push_back(dashboard::SignalRecord {
+                                timestamp_ms: ctx.timestamp_ms,
+                                symbol: matched_key.clone(),
+                                strategy: "DIAG".to_string(),
+                                side: format!(
+                                    "hi60={:.0} lo60={:.0} price={:.0} cvd={:.1} vol_r={:.2} imb={:.2} rsi={:.0} fr={:.5} pv30={:.3}",
+                                    ctx.highest_high_60s,
+                                    ctx.lowest_low_60s,
+                                    decimal_to_f64(ctx.last_price),
+                                    ctx.cvd,
+                                    ctx.volume_ratio,
+                                    ctx.imbalance_ratio,
+                                    ctx.rsi_14,
+                                    ctx.funding_rate,
+                                    ctx.price_velocity_30s,
+                                ),
+                                strength: 0.0,
+                                accepted: false,
+                            });
+                        }
+
                         let result = ensemble.evaluate_detailed(&ctx);
 
                         // Log individual strategy votes to Analyst Log
