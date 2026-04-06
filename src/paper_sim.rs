@@ -28,6 +28,8 @@ struct OpenPosition {
     side: Side,
     avg_price: Decimal,
     quantity: Decimal,
+    take_profit: Option<Decimal>,
+    stop_loss: Option<Decimal>,
 }
 
 pub async fn run_paper_sim(
@@ -43,6 +45,93 @@ pub async fn run_paper_sim(
 
     loop {
         interval.tick().await;
+
+        // ── Auto-close open positions when price crosses TP or SL ───────
+        if !positions.is_empty() {
+            let obs = orderbooks.lock().await;
+            let mut to_close: Vec<(String, Decimal, &'static str)> = Vec::new();
+            for (sym, pos) in positions.iter() {
+                let ob = match obs.get(sym) {
+                    Some(ob) => ob,
+                    None => continue,
+                };
+                let (best_bid, best_ask) = match (ob.best_bid(), ob.best_ask()) {
+                    (Some((b, _)), Some((a, _))) => (b, a),
+                    _ => continue,
+                };
+                // For a long, exit price is best_bid; for a short, best_ask
+                let exit_px = match pos.side {
+                    Side::Buy => best_bid,
+                    Side::Sell => best_ask,
+                };
+                // TP/SL triggers
+                if let Some(tp) = pos.take_profit {
+                    let hit = match pos.side {
+                        Side::Buy => exit_px >= tp,
+                        Side::Sell => exit_px <= tp,
+                    };
+                    if hit {
+                        to_close.push((sym.clone(), exit_px, "TP"));
+                        continue;
+                    }
+                }
+                if let Some(sl) = pos.stop_loss {
+                    let hit = match pos.side {
+                        Side::Buy => exit_px <= sl,
+                        Side::Sell => exit_px >= sl,
+                    };
+                    if hit {
+                        to_close.push((sym.clone(), exit_px, "SL"));
+                    }
+                }
+            }
+            drop(obs);
+
+            // Realize closures
+            for (sym, exit_px, reason) in to_close {
+                if let Some(pos) = positions.remove(&sym) {
+                    let pnl_dec = match pos.side {
+                        Side::Buy => (exit_px - pos.avg_price) * pos.quantity,
+                        Side::Sell => (pos.avg_price - exit_px) * pos.quantity,
+                    };
+                    let pnl_f64 = pnl_dec.to_f64().unwrap_or(0.0);
+                    let fees_dec = exit_px * pos.quantity
+                        * Decimal::from_f64(TAKER_FEE_BPS / 10_000.0).unwrap_or(Decimal::ZERO);
+                    let fees_f64 = fees_dec.to_f64().unwrap_or(0.0);
+                    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+
+                    {
+                        let mut rm = risk_manager.lock().await;
+                        rm.on_trade_result(pnl_f64, fees_f64, now_ms);
+                    }
+
+                    let exit_side = match pos.side {
+                        Side::Buy => Side::Sell,
+                        Side::Sell => Side::Buy,
+                    };
+                    trade_history.lock().await.push(TradeRecord {
+                        timestamp_ms: now_ms,
+                        symbol: sym.clone(),
+                        side: format!("{:?}", exit_side),
+                        price: exit_px.to_string(),
+                        quantity: pos.quantity.to_string(),
+                        pnl: pnl_f64,
+                        fees: fees_f64,
+                        order_id: format!("close-{}-{}", reason, now_ms),
+                    });
+
+                    console_log.lock().await.push(format!(
+                        "Auto-close [{}]: {} {:.6} {} @ {} → PnL ${:.4}",
+                        reason,
+                        format!("{:?}", exit_side),
+                        pos.quantity.to_f64().unwrap_or(0.0),
+                        sym,
+                        exit_px.round_dp(2),
+                        pnl_f64,
+                    ));
+                }
+            }
+        }
 
         let open_orders = order_tracker.open_orders();
         if open_orders.is_empty() {
@@ -149,6 +238,9 @@ pub async fn run_paper_sim(
                             pos.avg_price = (pos.avg_price * pos.quantity + fill_price * qty) / total_qty;
                             pos.quantity = total_qty;
                         }
+                        // Refresh TP/SL from the latest order
+                        if order.take_profit.is_some() { pos.take_profit = order.take_profit; }
+                        if order.stop_loss.is_some() { pos.stop_loss = order.stop_loss; }
                         0.0
                     }
                     None => {
@@ -157,6 +249,8 @@ pub async fn run_paper_sim(
                             side: order.side,
                             avg_price: fill_price,
                             quantity: qty,
+                            take_profit: order.take_profit,
+                            stop_loss: order.stop_loss,
                         });
                         0.0
                     }

@@ -441,6 +441,8 @@ async fn main() -> Result<()> {
                     status: scalper_execution::order_tracker::OrderStatus::New,
                     created_ms: validated.signal.timestamp_ms,
                     updated_ms: validated.signal.timestamp_ms,
+                    take_profit: validated.signal.take_profit,
+                    stop_loss: validated.signal.stop_loss,
                 };
                 order_tracker.track(managed);
             }
