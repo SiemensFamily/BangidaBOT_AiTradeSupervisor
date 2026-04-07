@@ -2,12 +2,13 @@
 //!
 //! Periodically analyzes recent trade history and adjusts config to improve
 //! profitability. Writes changes to the shared config and persists to disk
-//! at config/default.toml.
+//! at config/default.toml. Also writes a dedicated log at logs/auto_tuner.log.
 //!
 //! Strategies are constructed once at startup, so config changes only take
 //! effect after the bot is restarted.
 
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, RwLock};
 
 use scalper_core::config::ScalperConfig;
@@ -17,6 +18,18 @@ use crate::dashboard::{ConsoleLog, TradeRecord};
 const TUNE_INTERVAL_SECS: u64 = 300;
 const MIN_TRADES_FOR_TUNING: usize = 5;
 const RECENT_TRADE_WINDOW: usize = 20;
+const LOG_PATH: &str = "logs/auto_tuner.log";
+
+/// Public state shared with the dashboard so the UI can show whether the
+/// auto-tuner has run, when it last ran, and what it last did.
+#[derive(Debug, Default, Clone)]
+pub struct AutoTunerState {
+    pub last_run_ms: u64,
+    pub total_runs: u64,
+    pub total_changes: u64,
+    pub last_summary: String,
+    pub last_changes: Vec<String>,
+}
 
 #[derive(Debug, Default)]
 struct TradeMetrics {
@@ -144,11 +157,33 @@ async fn persist_config(cfg: &ScalperConfig, path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Append a line to the auto-tuner log file. Creates the parent directory
+/// and the file if they don't exist. Logged separately from the general
+/// console log so the user can review tuning history independently.
+async fn append_log(line: &str) -> anyhow::Result<()> {
+    if let Some(parent) = std::path::Path::new(LOG_PATH).parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(LOG_PATH)
+        .await?;
+    let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+    file.write_all(format!("{} {}\n", ts, line).as_bytes()).await?;
+    Ok(())
+}
+
 pub async fn run_auto_tuner(
     config: Arc<RwLock<ScalperConfig>>,
     trade_history: Arc<Mutex<Vec<TradeRecord>>>,
     console_log: Arc<Mutex<ConsoleLog>>,
+    state: Arc<Mutex<AutoTunerState>>,
 ) {
+    // Initial heartbeat to the log file so the user can verify the agent
+    // is alive even before any tuning cycle has run.
+    let _ = append_log("startup auto-tuner task started").await;
+
     let mut interval =
         tokio::time::interval(tokio::time::Duration::from_secs(TUNE_INTERVAL_SECS));
     // Skip the first immediate tick — let the bot collect data first
@@ -156,29 +191,44 @@ pub async fn run_auto_tuner(
 
     loop {
         interval.tick().await;
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
 
         // Compute metrics inside the lock scope to avoid cloning trades
-        let metrics = {
+        let metrics_result: Result<TradeMetrics, usize> = {
             let history = trade_history.lock().await;
             let n = history.len().min(RECENT_TRADE_WINDOW);
             let slice = &history[history.len() - n..];
             if slice.len() < MIN_TRADES_FOR_TUNING {
-                let count = slice.len();
-                drop(history);
+                Err(slice.len())
+            } else {
+                Ok(compute_metrics(slice))
+            }
+        };
+
+        let metrics = match metrics_result {
+            Ok(m) => m,
+            Err(count) => {
+                let _ = append_log(&format!(
+                    "skip insufficient_trades count={} need={}",
+                    count, MIN_TRADES_FOR_TUNING
+                ))
+                .await;
                 console_log.lock().await.push(format!(
                     "Auto-tuner: skipping (only {} recent trades, need {})",
                     count, MIN_TRADES_FOR_TUNING
                 ));
+                let mut s = state.lock().await;
+                s.last_run_ms = now_ms;
+                s.total_runs += 1;
+                s.last_summary = format!("skip: {}/{} trades", count, MIN_TRADES_FOR_TUNING);
+                s.last_changes.clear();
                 continue;
             }
-            compute_metrics(slice)
         };
 
         let mut new_cfg = config.read().await.clone();
         let changes = apply_rules(&mut new_cfg, &metrics);
 
-        // Apply config + persist BEFORE batching log messages, so the locks
-        // we hold while logging don't overlap with the config write.
         let persist_err = if changes.is_empty() {
             None
         } else {
@@ -189,10 +239,8 @@ pub async fn run_auto_tuner(
                 .map(|e| e.to_string())
         };
 
-        // Batch all log messages into a single lock acquisition
-        let mut log = console_log.lock().await;
-        log.push(format!(
-            "Auto-tuner: n={} wins={} losses={} win_rate={:.0}% R={:.2} PF={:.2} net=${:.2}",
+        let summary = format!(
+            "n={} wins={} losses={} win_rate={:.0}% R={:.2} PF={:.2} net=${:.2}",
             metrics.total,
             metrics.wins,
             metrics.losses,
@@ -200,7 +248,33 @@ pub async fn run_auto_tuner(
             metrics.r_multiple,
             metrics.profit_factor,
             metrics.net_pnl,
-        ));
+        );
+
+        // Write to dedicated log file (one line per event)
+        let _ = append_log(&format!("metrics {}", summary)).await;
+        for c in &changes {
+            let _ = append_log(&format!("change {}", c)).await;
+        }
+        if let Some(ref e) = persist_err {
+            let _ = append_log(&format!("persist_failed {}", e)).await;
+        }
+        if changes.is_empty() {
+            let _ = append_log("no_changes").await;
+        }
+
+        // Update shared dashboard state
+        {
+            let mut s = state.lock().await;
+            s.last_run_ms = now_ms;
+            s.total_runs += 1;
+            s.total_changes += changes.len() as u64;
+            s.last_summary = summary.clone();
+            s.last_changes = changes.clone();
+        }
+
+        // Mirror to console_log (batched in a single lock acquisition)
+        let mut log = console_log.lock().await;
+        log.push(format!("Auto-tuner: {}", summary));
         if changes.is_empty() {
             log.push("Auto-tuner: no changes (metrics within target range)".to_string());
         } else {

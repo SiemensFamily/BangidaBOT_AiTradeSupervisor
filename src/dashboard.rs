@@ -21,6 +21,7 @@ use scalper_execution::order_tracker::OrderTracker;
 use scalper_risk::risk_manager::RiskManager;
 
 use crate::IndicatorState;
+use crate::auto_tuner::AutoTunerState;
 use scalper_strategy::StrategyVote;
 
 // ── Trade history ──────────────────────────────────────────────────────────
@@ -104,6 +105,7 @@ pub struct DashboardState {
     pub signal_log: Arc<Mutex<VecDeque<SignalRecord>>>,
     pub connected_exchanges: Arc<Mutex<HashSet<String>>>,
     pub strategy_votes: Arc<Mutex<Vec<StrategyVote>>>,
+    pub auto_tuner_state: Arc<Mutex<AutoTunerState>>,
     pub ws_tx: broadcast::Sender<String>,
 }
 
@@ -150,6 +152,17 @@ struct Snapshot {
     exchange_status: Vec<ExchangeStatus>,
     // Strategy status
     strategy_status: Vec<StrategyStatusSnap>,
+    // Auto-tuner status
+    auto_tuner: AutoTunerSnap,
+}
+
+#[derive(Serialize)]
+struct AutoTunerSnap {
+    last_run_ms: u64,
+    total_runs: u64,
+    total_changes: u64,
+    last_summary: String,
+    last_changes: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -452,6 +465,17 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
         .collect();
     drop(votes);
 
+    // Auto-tuner status
+    let at = state.auto_tuner_state.lock().await;
+    let auto_tuner = AutoTunerSnap {
+        last_run_ms: at.last_run_ms,
+        total_runs: at.total_runs,
+        total_changes: at.total_changes,
+        last_summary: at.last_summary.clone(),
+        last_changes: at.last_changes.clone(),
+    };
+    drop(at);
+
     Snapshot {
         timestamp_ms: now_ms,
         mode: state.config_mode.clone(),
@@ -484,5 +508,6 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
         trade_history,
         exchange_status,
         strategy_status,
+        auto_tuner,
     }
 }

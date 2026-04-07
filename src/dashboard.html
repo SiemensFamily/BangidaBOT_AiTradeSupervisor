@@ -115,6 +115,13 @@
         .strat-led { display:flex; align-items:center; gap:4px; font-size:0.78em; color:#8b949e; }
         .strat-led .led { width:8px; height:8px; border-radius:50%; background:#484f58; }
         .strat-led .led.firing { background:#d29922; }
+        /* Auto-tuner badge */
+        .tuner-badge { display:flex; align-items:center; gap:4px; font-size:0.78em; color:#8b949e;
+                       border-left:1px solid #30363d; padding-left:12px; margin-left:4px; cursor:help; }
+        .tuner-badge .led { width:8px; height:8px; border-radius:50%; background:#484f58; }
+        .tuner-badge .led.idle { background:#484f58; }
+        .tuner-badge .led.active { background:#2ea043; }
+        .tuner-badge .led.recent { background:#58a6ff; }
 
         /* Terminal */
         .terminal { background:#0d1117; border:1px solid #30363d; border-radius:8px; margin:16px 24px;
@@ -140,6 +147,9 @@
         <div style="display:flex;align-items:center;gap:16px;">
             <div class="exch-leds" id="exchLeds"></div>
             <div class="strat-leds" id="stratLeds"></div>
+            <div class="tuner-badge" id="tunerBadge" title="Auto-tuner status">
+                <span class="led idle"></span>tuner
+            </div>
             <div style="display:flex;align-items:center;gap:6px;">
                 <span class="status-dot off" id="wsDot"></span>
                 <span class="meta" id="wsLabel">Connecting...</span>
@@ -651,6 +661,30 @@ function updateUI(d) {
             const tip = s.active ? `${s.side} (${(s.strength*100).toFixed(0)}%)` : 'idle';
             return `<span class="strat-led" title="${s.name}: ${tip}"><span class="led ${s.active?'firing':''}"></span>${short}</span>`;
         }).join('');
+    }
+
+    // Auto-tuner badge
+    if (d.auto_tuner) {
+        const tb = document.getElementById('tunerBadge');
+        const at = d.auto_tuner;
+        let cls = 'idle';
+        let tip = 'Auto-tuner: not yet run';
+        if (at.last_run_ms > 0) {
+            const ageSec = Math.floor((Date.now() - at.last_run_ms) / 1000);
+            // "recent" within 30s of a run, otherwise "active" (alive but quiet)
+            cls = ageSec <= 30 ? 'recent' : 'active';
+            const ageStr = ageSec < 60 ? `${ageSec}s ago` :
+                           ageSec < 3600 ? `${Math.floor(ageSec/60)}m ago` :
+                           `${Math.floor(ageSec/3600)}h ago`;
+            tip = `Auto-tuner — last run ${ageStr}\n` +
+                  `Runs: ${at.total_runs}  Changes applied: ${at.total_changes}\n` +
+                  `Last: ${at.last_summary || 'no metrics'}`;
+            if (at.last_changes && at.last_changes.length > 0) {
+                tip += '\n' + at.last_changes.map(c => '  ' + c).join('\n');
+            }
+        }
+        tb.innerHTML = `<span class="led ${cls}"></span>tuner`;
+        tb.title = tip;
     }
 
     // Terminal (console log)

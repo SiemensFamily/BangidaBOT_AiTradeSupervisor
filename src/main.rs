@@ -503,13 +503,15 @@ async fn main() -> Result<()> {
 
     // Auto-tuner: heuristic agent that adjusts strategy parameters from
     // recent trade performance every 5 minutes.
+    let auto_tuner_state = Arc::new(Mutex::new(auto_tuner::AutoTunerState::default()));
     {
         let cfg = shared_config.clone();
         let history = trade_history.clone();
         let cl = console_log.clone();
+        let st = auto_tuner_state.clone();
         tokio::spawn(async move {
             info!("Auto-tuner task started");
-            auto_tuner::run_auto_tuner(cfg, history, cl).await;
+            auto_tuner::run_auto_tuner(cfg, history, cl, st).await;
         });
     }
 
@@ -585,6 +587,7 @@ async fn main() -> Result<()> {
             signal_log,
             connected_exchanges,
             strategy_votes,
+            auto_tuner_state,
             ws_tx,
         };
         tokio::spawn(dashboard::start_dashboard(dash_state));
