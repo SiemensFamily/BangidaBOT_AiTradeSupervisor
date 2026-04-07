@@ -235,6 +235,7 @@ pub async fn start_dashboard(state: DashboardState) {
         .route("/api/trades.csv", get(get_trades_csv))
         .route("/api/signals.csv", get(get_signals_csv))
         .route("/api/console.csv", get(get_console_csv))
+        .route("/api/auto_tuner_log", get(get_auto_tuner_log))
         .route("/api/debug", get(get_debug))
         .with_state(state);
 
@@ -341,6 +342,27 @@ async fn get_console_csv(State(state): State<DashboardState>) -> impl IntoRespon
         [(header::CONTENT_TYPE, "text/csv"), (header::CONTENT_DISPOSITION, "attachment; filename=\"console.csv\"")],
         csv,
     )
+}
+
+// ── REST: Auto-tuner log tail ─────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct AutoTunerLogResponse {
+    lines: Vec<String>,
+}
+
+async fn get_auto_tuner_log() -> Json<AutoTunerLogResponse> {
+    const LOG_PATH: &str = "logs/auto_tuner.log";
+    const MAX_LINES: usize = 200;
+    let lines = match tokio::fs::read_to_string(LOG_PATH).await {
+        Ok(content) => {
+            let all: Vec<&str> = content.lines().collect();
+            let start = all.len().saturating_sub(MAX_LINES);
+            all[start..].iter().map(|s| s.to_string()).collect()
+        }
+        Err(_) => Vec::new(),
+    };
+    Json(AutoTunerLogResponse { lines })
 }
 
 // ── REST: Debug ───────────────────────────────────────────────────────────

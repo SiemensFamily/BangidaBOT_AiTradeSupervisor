@@ -178,6 +178,7 @@
         <button class="tab-btn" onclick="switchTab('terminal')">Terminal</button>
         <button class="tab-btn" onclick="switchTab('tradelog')">Trade Log</button>
         <button class="tab-btn" onclick="switchTab('analyst')">Analyst Log</button>
+        <button class="tab-btn" onclick="switchTab('livebot')">Live Bot</button>
         <button class="tab-btn" onclick="switchTab('settings')">Settings</button>
         <button class="tab-btn" onclick="switchTab('tradelogic')">Trade Logic</button>
     </div>
@@ -269,6 +270,17 @@
                 <tbody id="analystLogBody"></tbody>
             </table>
             <div class="empty-msg" id="noSignals">No signals yet</div>
+        </div>
+    </div>
+
+    <!-- Live Bot Tab (auto-tuner log tail) -->
+    <div class="tab-content" id="tab-livebot">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;padding-top:6px;">
+            <span style="font-size:0.85em;color:#8b949e;">Auto-tuner activity (logs/auto_tuner.log)</span>
+            <span class="meta" id="livebotStatus">refreshing every 5s</span>
+        </div>
+        <div class="terminal" id="livebotOutput">
+            <div class="term-line"><span class="msg" style="color:#484f58;">Loading...</span></div>
         </div>
     </div>
 
@@ -744,6 +756,34 @@ function connect() {
     ws.onmessage = e => { try { updateUI(JSON.parse(e.data)); } catch(err) { console.error(err); } };
 }
 connect();
+
+/* ── Auto-tuner log tail (Live Bot tab) ── */
+async function refreshLiveBot() {
+    try {
+        const r = await fetch('/api/auto_tuner_log');
+        const data = await r.json();
+        const out = document.getElementById('livebotOutput');
+        if (!data.lines || data.lines.length === 0) {
+            out.innerHTML = '<div class="term-line"><span class="msg" style="color:#484f58;">No log entries yet. The auto-tuner runs every 5 minutes.</span></div>';
+            return;
+        }
+        // Color-code lines: green for change/metrics, red for persist_failed, gray for skip/no_changes
+        out.innerHTML = data.lines.map(line => {
+            let color = '#8b949e';
+            if (line.includes(' change ')) color = '#3fb950';
+            else if (line.includes(' metrics ')) color = '#58a6ff';
+            else if (line.includes(' persist_failed ')) color = '#f85149';
+            else if (line.includes(' skip ')) color = '#6e7681';
+            return `<div class="term-line"><span class="msg" style="color:${color};">${line}</span></div>`;
+        }).join('');
+        // Auto-scroll to bottom
+        out.scrollTop = out.scrollHeight;
+    } catch (e) {
+        document.getElementById('livebotStatus').textContent = 'error: ' + e;
+    }
+}
+refreshLiveBot();
+setInterval(refreshLiveBot, 5000);
 
 /* ── Settings ── */
 let configLoaded = false;
