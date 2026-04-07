@@ -21,6 +21,10 @@ use crate::dashboard::{ConsoleLog, TradeRecord};
 const SLIPPAGE_BPS: f64 = 2.0;
 const TAKER_FEE_BPS: f64 = 4.0;
 const MAKER_FEE_BPS: f64 = 2.0;
+/// Force-close positions that have been open longer than this. Prevents
+/// the symbol from being blocked by a stagnant position that isn't
+/// hitting TP or SL.
+const MAX_HOLD_MS: u64 = 10 * 60 * 1000; // 10 minutes
 
 /// An open paper position for a symbol.
 #[derive(Debug, Clone)]
@@ -30,6 +34,7 @@ struct OpenPosition {
     quantity: Decimal,
     take_profit: Option<Decimal>,
     stop_loss: Option<Decimal>,
+    opened_ms: u64,
 }
 
 pub async fn run_paper_sim(
@@ -85,7 +90,18 @@ pub async fn run_paper_sim(
                     };
                     if hit {
                         to_close.push((sym.clone(), exit_px, "SL"));
+                        continue;
                     }
+                }
+                // Time-based exit: close if held longer than MAX_HOLD_MS.
+                // Prevents a stagnant position from blocking the symbol
+                // from taking new trades.
+                let age_ms = chrono::Utc::now()
+                    .timestamp_millis()
+                    .saturating_sub(pos.opened_ms as i64)
+                    .max(0) as u64;
+                if age_ms >= MAX_HOLD_MS {
+                    to_close.push((sym.clone(), exit_px, "TIME"));
                 }
             }
             drop(obs);
@@ -273,6 +289,7 @@ pub async fn run_paper_sim(
                             quantity: qty,
                             take_profit: order.take_profit,
                             stop_loss: order.stop_loss,
+                            opened_ms: now_ms,
                         });
                         0.0
                     }
