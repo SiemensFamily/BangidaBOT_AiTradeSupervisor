@@ -141,12 +141,12 @@ impl EnsembleStrategy {
         };
 
         // Require minimum 2 strategies agreeing — UNLESS a solo signal has
-        // VERY high conviction (>= 0.7 strength). This filters out marginal
-        // single-strategy signals that are prone to whipsawing in thin markets
-        // (Kraken Futures order books flip imbalance direction frequently).
+        // moderate-to-high conviction (>= 0.5 strength). With profit factor
+        // running ~3, the marginal signals add to expected value even if
+        // win rate dips slightly.
         let total_enabled = self.strategies.len();
         let solo_high_conviction = chosen_signals.len() == 1
-            && chosen_signals[0].0.strength >= 0.7;
+            && chosen_signals[0].0.strength >= 0.5;
         if total_enabled > 1 && chosen_signals.len() < 2 && !solo_high_conviction {
             return EvalResult { signal: None, votes };
         }

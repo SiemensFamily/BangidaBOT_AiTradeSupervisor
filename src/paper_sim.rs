@@ -44,7 +44,7 @@ pub async fn run_paper_sim(
     let mut positions: HashMap<String, OpenPosition> = HashMap::new();
     // Per-symbol cooldown timestamps (skip new entries until this time)
     let mut cooldowns: HashMap<String, u64> = HashMap::new();
-    const COOLDOWN_MS: u64 = 60_000; // 60 seconds after a close
+    const COOLDOWN_MS: u64 = 20_000; // 20s after a close — was 60s
 
     loop {
         interval.tick().await;

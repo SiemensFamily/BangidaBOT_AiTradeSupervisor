@@ -50,12 +50,12 @@ max_consecutive_losses = 3        # 3 losses = 15min cooldown
 cooldown_minutes = 15             # Short recovery for rapid growth
 min_equity = 25.0                 # Hard floor — stop trading at $25
 max_open_positions = 1            # One trade at a time (capital constraint)
-max_trades_per_hour = 6           # Reduced from 15 — fewer, higher-quality trades
+max_trades_per_hour = 30          # Was 6 — bot was hitting the cap. Profit factor 3.29 supports scaling up.
 max_leverage = 20                 # Up to 20x
 
 # Strategy configuration
 [strategy]
-ensemble_threshold = 0.40         # Raised from 0.20 — only strong combined signals trade
+ensemble_threshold = 0.25         # Was 0.40 — let more 2-strategy consensus signals through
 
 [strategy.momentum]
 enabled = true
@@ -70,7 +70,7 @@ rsi_oversold = 20.0
 [strategy.ob_imbalance]
 enabled = true
 weight = 0.25                     # SECONDARY strategy
-imbalance_threshold = 0.50        # Raised from 0.30 — require strong imbalance to filter Kraken's thin-book noise
+imbalance_threshold = 0.35        # Was 0.50 — more entries; we have edge so trade more
 take_profit_ticks = 8             # Raised from 3 — give trades room to run past spread noise
 stop_loss_ticks = 5               # Raised from 2 — wider stop to survive bid/ask wiggle (R:R = 1.6)
 
