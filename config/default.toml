@@ -43,24 +43,24 @@ max_leverage = 20
 
 # Risk management — tuned for $100 starting capital
 [risk]
-max_risk_per_trade_pct = 3.0      # $3 risk per trade on $100
+max_risk_per_trade_pct = 1.0      # $1 risk per trade (was 3.0 — too aggressive given losing streak)
 max_daily_loss_pct = 10.0         # $10 max daily loss
 max_drawdown_pct = 25.0           # 25% peak drawdown limit
 max_consecutive_losses = 3        # 3 losses = 15min cooldown
 cooldown_minutes = 15             # Short recovery for rapid growth
 min_equity = 25.0                 # Hard floor — stop trading at $25
 max_open_positions = 1            # One trade at a time (capital constraint)
-max_trades_per_hour = 15          # Controlled frequency
+max_trades_per_hour = 6           # Reduced from 15 — fewer, higher-quality trades
 max_leverage = 20                 # Up to 20x
 
 # Strategy configuration
 [strategy]
-ensemble_threshold = 0.20         # Minimum weighted strength to emit signal
+ensemble_threshold = 0.40         # Raised from 0.20 — only strong combined signals trade
 
 [strategy.momentum]
 enabled = true
 weight = 0.40                     # PRIMARY strategy
-volume_spike_multiplier = 2.5
+volume_spike_multiplier = 2.0     # Lowered from 2.5 — momentum can fire on more moves
 take_profit_pct = 0.50            # 0.50% TP
 stop_loss_pct = 0.25              # 0.25% SL (2:1 R:R)
 trailing_stop_pct = 0.20
@@ -70,12 +70,12 @@ rsi_oversold = 20.0
 [strategy.ob_imbalance]
 enabled = true
 weight = 0.25                     # SECONDARY strategy
-imbalance_threshold = 0.30        # Require 30% imbalance
-take_profit_ticks = 3
-stop_loss_ticks = 2
+imbalance_threshold = 0.50        # Raised from 0.30 — require strong imbalance to filter Kraken's thin-book noise
+take_profit_ticks = 8             # Raised from 3 — give trades room to run past spread noise
+stop_loss_ticks = 5               # Raised from 2 — wider stop to survive bid/ask wiggle (R:R = 1.6)
 
 [strategy.liquidation_wick]
-enabled = true
+enabled = false                   # DISABLED — Kraken WS doesn't send liquidation events, never fires
 weight = 0.20                     # Reversal strategy
 price_velocity_threshold = 1.0    # 1% move in 30s
 volume_spike_multiplier = 3.0     # 3x avg liquidation volume
@@ -83,7 +83,7 @@ take_profit_pct = 0.80
 stop_loss_pct = 0.40
 
 [strategy.funding_bias]
-enabled = true
+enabled = false                   # DISABLED — funding rate not extracted from Kraken ticker, never fires
 weight = 0.15                     # SUPPLEMENTARY
 funding_threshold = 0.05          # 5% funding rate
 strength_boost = 0.10             # +0.1 signal boost
