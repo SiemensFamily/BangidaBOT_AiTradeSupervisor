@@ -20,7 +20,6 @@ use crate::dashboard::{ConsoleLog, TradeRecord};
 
 const SLIPPAGE_BPS: f64 = 2.0;
 const TAKER_FEE_BPS: f64 = 4.0;
-const MAKER_FEE_BPS: f64 = 2.0;
 /// Force-close positions that have been open longer than this. Prevents
 /// the symbol from being blocked by a stagnant position that isn't
 /// hitting TP or SL.
@@ -177,8 +176,15 @@ pub async fn run_paper_sim(
             let best_ask = best_ask.unwrap();
 
             // ── Entry guards ───────────────────────────────────────────
-            // Skip if a cooldown is active for this symbol
+            // Cancel stale orders — the strategy's intent is to enter NOW,
+            // so orders older than MAX_ORDER_AGE_MS are no longer valid.
             let now_check = chrono::Utc::now().timestamp_millis() as u64;
+            const MAX_ORDER_AGE_MS: u64 = 5_000;
+            if now_check.saturating_sub(order.created_ms) > MAX_ORDER_AGE_MS {
+                order_tracker.update(&order.order_id, Decimal::ZERO, Decimal::ZERO, "Cancelled", now_check);
+                continue;
+            }
+            // Skip if a cooldown is active for this symbol
             if let Some(&cd_until) = cooldowns.get(&order.symbol) {
                 if now_check < cd_until {
                     order_tracker.update(&order.order_id, Decimal::ZERO, Decimal::ZERO, "Cancelled", now_check);
@@ -194,8 +200,11 @@ pub async fn run_paper_sim(
             }
 
             let fill_result = match order.order_type {
-                OrderType::Market => {
-                    // Fill at best bid/ask with slippage
+                OrderType::Market | OrderType::Limit => {
+                    // Fill immediately at current market with slippage.
+                    // The strategy's intent is "enter now" — waiting for the
+                    // book to cross a stale limit price causes systematically
+                    // bad entries (filled only during adverse moves).
                     let slippage_mult =
                         Decimal::from_f64(SLIPPAGE_BPS / 10_000.0).unwrap_or(Decimal::ZERO);
                     let fill_price = match order.side {
@@ -205,20 +214,6 @@ pub async fn run_paper_sim(
                     let fee_rate =
                         Decimal::from_f64(TAKER_FEE_BPS / 10_000.0).unwrap_or(Decimal::ZERO);
                     Some((fill_price, fee_rate))
-                }
-                OrderType::Limit => {
-                    // Fill when market crosses the limit price
-                    let should_fill = match order.side {
-                        Side::Buy => best_ask <= order.price,
-                        Side::Sell => best_bid >= order.price,
-                    };
-                    if should_fill {
-                        let fee_rate =
-                            Decimal::from_f64(MAKER_FEE_BPS / 10_000.0).unwrap_or(Decimal::ZERO);
-                        Some((order.price, fee_rate))
-                    } else {
-                        None
-                    }
                 }
                 // Stop/TP orders: treat like market when triggered
                 OrderType::StopMarket | OrderType::TakeProfitMarket => {
