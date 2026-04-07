@@ -134,21 +134,35 @@ impl ScalperConfig {
         let mut cfg: ScalperConfig = settings.try_deserialize()?;
 
         // The config crate's Environment source can wipe nested HashMaps like
-        // symbol_map because env vars can only express leaf values. Backfill
-        // known defaults when the map is empty.
+        // symbol_map because env vars can only express leaf values. It also
+        // lowercases all keys from merged TOML tables, so symbol_map keys
+        // arrive as "btcusdt" instead of "BTCUSDT". Re-uppercase the keys and
+        // backfill known defaults when the map is empty.
+        let normalize_map = |map: &mut std::collections::HashMap<String, String>| {
+            let entries: Vec<(String, String)> = map
+                .drain()
+                .map(|(k, v)| (k.to_uppercase(), v))
+                .collect();
+            for (k, v) in entries {
+                map.insert(k, v);
+            }
+        };
         if let Some(ref mut kraken) = cfg.exchanges.kraken {
+            normalize_map(&mut kraken.symbol_map);
             if kraken.symbol_map.is_empty() {
                 kraken.symbol_map.insert("BTCUSDT".into(), "PI_XBTUSD".into());
                 kraken.symbol_map.insert("ETHUSDT".into(), "PI_ETHUSD".into());
             }
         }
         if let Some(ref mut binance) = cfg.exchanges.binance {
+            normalize_map(&mut binance.symbol_map);
             if binance.symbol_map.is_empty() {
                 binance.symbol_map.insert("BTCUSDT".into(), "BTCUSDT".into());
                 binance.symbol_map.insert("ETHUSDT".into(), "ETHUSDT".into());
             }
         }
         if let Some(ref mut bybit) = cfg.exchanges.bybit {
+            normalize_map(&mut bybit.symbol_map);
             if bybit.symbol_map.is_empty() {
                 bybit.symbol_map.insert("BTCUSDT".into(), "BTCUSDT".into());
                 bybit.symbol_map.insert("ETHUSDT".into(), "ETHUSDT".into());
