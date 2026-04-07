@@ -182,6 +182,7 @@ async fn main() -> Result<()> {
         let last_funding_rate = last_funding_rate.clone();
         let price_history = price_history.clone();
         let signal_log = signal_log.clone();
+        let console_log = console_log.clone();
         // Build map of config symbol → all possible orderbook keys (including mapped names)
         let mut symbol_lookup: HashMap<String, Vec<String>> = HashMap::new();
         for s in &symbols {
@@ -231,28 +232,22 @@ async fn main() -> Result<()> {
 
                     if let Some(ctx) = ctx_opt {
                         // Periodic diagnostic dump every 30s (300 ticks at 100ms)
+                        // to the console/terminal tab — kept out of the Analyst
+                        // Log so signal rows aren't polluted by debug entries.
                         if diag_counter % 300 == 1 {
-                            let mut sl = signal_log.lock().await;
-                            if sl.len() >= 200 { sl.pop_front(); }
-                            sl.push_back(dashboard::SignalRecord {
-                                timestamp_ms: ctx.timestamp_ms,
-                                symbol: matched_key.clone(),
-                                strategy: "DIAG".to_string(),
-                                side: format!(
-                                    "hi60={:.0} lo60={:.0} price={:.0} cvd={:.1} imb={:.2} sprd={} rsi={:.0} fr={:.5} pv30={:.3}",
-                                    ctx.highest_high_60s,
-                                    ctx.lowest_low_60s,
-                                    decimal_to_f64(ctx.last_price),
-                                    ctx.cvd,
-                                    ctx.imbalance_ratio,
-                                    ctx.spread,
-                                    ctx.rsi_14,
-                                    ctx.funding_rate,
-                                    ctx.price_velocity_30s,
-                                ),
-                                strength: 0.0,
-                                accepted: false,
-                            });
+                            console_log.lock().await.push(format!(
+                                "DIAG {}: hi60={:.0} lo60={:.0} price={:.0} cvd={:.1} imb={:.2} sprd={} rsi={:.0} fr={:.5} pv30={:.3}",
+                                matched_key,
+                                ctx.highest_high_60s,
+                                ctx.lowest_low_60s,
+                                decimal_to_f64(ctx.last_price),
+                                ctx.cvd,
+                                ctx.imbalance_ratio,
+                                ctx.spread,
+                                ctx.rsi_14,
+                                ctx.funding_rate,
+                                ctx.price_velocity_30s,
+                            ));
                         }
 
                         let result = ensemble.evaluate_detailed(&ctx);
