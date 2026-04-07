@@ -27,6 +27,7 @@ use tracing::{error, info, warn};
 
 mod dashboard;
 mod paper_sim;
+mod auto_tuner;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -314,6 +315,8 @@ async fn main() -> Result<()> {
 
         tokio::spawn(async move {
             info!("Risk pipeline task started");
+            // Per-(strategy, symbol, side) last log timestamp for dedup
+            let mut last_logged: HashMap<(String, String, String), u64> = HashMap::new();
             while let Some(signal) = signal_rx.recv().await {
                 let rm = risk_manager.lock().await;
                 let regime = regime_detector.lock().await.regime();
@@ -324,13 +327,20 @@ async fn main() -> Result<()> {
 
                 let accepted = rm.validate_signal(&signal, regime, atr, price, now_ms);
 
-                // Log signal to analyst log
-                {
+                // Log signal to analyst log (deduped — only one entry per
+                // strategy+symbol+side per 30 seconds)
+                let side_str = format!("{:?}", signal.side);
+                let dedup_key = (signal.strategy_name.clone(), signal.symbol.clone(), side_str.clone());
+                let should_log = match last_logged.get(&dedup_key) {
+                    Some(prev_ts) => now_ms.saturating_sub(*prev_ts) >= 30_000,
+                    None => true,
+                };
+                if should_log {
                     let record = dashboard::SignalRecord {
                         timestamp_ms: now_ms,
                         symbol: signal.symbol.clone(),
                         strategy: signal.strategy_name.clone(),
-                        side: format!("{:?}", signal.side),
+                        side: side_str,
                         strength: signal.strength,
                         accepted: accepted.is_some(),
                     };
@@ -339,6 +349,8 @@ async fn main() -> Result<()> {
                         sl.pop_front();
                     }
                     sl.push_back(record);
+                    drop(sl);
+                    last_logged.insert(dedup_key, now_ms);
                 }
 
                 if let Some(validated) = accepted {
@@ -486,8 +498,20 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Shared config for dashboard
+    // Shared config for dashboard (and auto-tuner)
     let shared_config = Arc::new(tokio::sync::RwLock::new(config.clone()));
+
+    // Auto-tuner: heuristic agent that adjusts strategy parameters from
+    // recent trade performance every 5 minutes.
+    {
+        let cfg = shared_config.clone();
+        let history = trade_history.clone();
+        let cl = console_log.clone();
+        tokio::spawn(async move {
+            info!("Auto-tuner task started");
+            auto_tuner::run_auto_tuner(cfg, history, cl).await;
+        });
+    }
 
     // Task h: Heartbeat — log scanning status every 10s
     {
