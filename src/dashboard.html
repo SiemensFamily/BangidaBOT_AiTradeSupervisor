@@ -212,6 +212,11 @@
                 <div class="row"><span class="lbl">Trades/Hour</span><span id="tradesHour">0</span></div>
                 <div class="row"><span class="lbl">Daily Loss</span><span id="dailyLoss">$0.00</span></div>
                 <div class="row"><span class="lbl">Regime</span><span class="badge warn" id="regime">--</span></div>
+                <div class="row"><span class="lbl">Circuit Breaker</span><span class="badge ok" id="cbStatus">ON</span></div>
+                <div style="display:flex;gap:8px;margin-top:10px;">
+                    <button class="btn" id="cbToggleBtn" onclick="toggleCircuitBreaker()">Disable & Reset</button>
+                    <button class="btn" onclick="resetCircuitBreaker()">Reset Only</button>
+                </div>
             </div>
             <div class="card chart-card">
                 <h3>Equity Curve</h3>
@@ -618,6 +623,15 @@ function updateUI(d) {
     const ct = document.getElementById('canTrade');
     ct.textContent = d.can_trade ? 'ACTIVE' : 'HALTED';
     ct.className = 'badge ' + (d.can_trade ? 'ok' : 'halt');
+    const cbs = document.getElementById('cbStatus');
+    if (cbs) {
+        cbs.textContent = d.circuit_breaker_enabled ? 'ON' : 'OFF';
+        cbs.className = 'badge ' + (d.circuit_breaker_enabled ? 'ok' : 'halt');
+    }
+    const cbBtn = document.getElementById('cbToggleBtn');
+    if (cbBtn) {
+        cbBtn.textContent = d.circuit_breaker_enabled ? 'Disable & Reset' : 'Enable';
+    }
     document.getElementById('consecLosses').textContent = d.consecutive_losses;
     document.getElementById('tradesHour').textContent = d.trades_this_hour;
     document.getElementById('dailyLoss').textContent = '$' + d.daily_loss.toFixed(2);
@@ -756,6 +770,35 @@ function connect() {
     ws.onmessage = e => { try { updateUI(JSON.parse(e.data)); } catch(err) { console.error(err); } };
 }
 connect();
+
+/* ── Circuit breaker controls ── */
+async function toggleCircuitBreaker() {
+    const cbs = document.getElementById('cbStatus');
+    const currentlyOn = cbs && cbs.textContent === 'ON';
+    const enabled = !currentlyOn;
+    try {
+        const r = await fetch('/api/circuit_breaker', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ enabled, reset: true }),
+        });
+        if (!r.ok) alert('Failed: ' + await r.text());
+    } catch (e) {
+        alert('Error: ' + e);
+    }
+}
+async function resetCircuitBreaker() {
+    try {
+        const r = await fetch('/api/circuit_breaker', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ enabled: true, reset: true }),
+        });
+        if (!r.ok) alert('Failed: ' + await r.text());
+    } catch (e) {
+        alert('Error: ' + e);
+    }
+}
 
 /* ── Auto-tuner log tail (Live Bot tab) ── */
 async function refreshLiveBot() {

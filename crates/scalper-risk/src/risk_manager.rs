@@ -14,6 +14,9 @@ pub struct RiskManager {
     config: RiskConfig,
     circuit_breaker: CircuitBreaker,
     pnl_tracker: PnlTracker,
+    /// Runtime toggle — when false, all circuit-breaker checks are bypassed.
+    /// Used by the dashboard "Disable Circuit Breakers" button for testing.
+    circuit_breaker_enabled: bool,
 }
 
 impl RiskManager {
@@ -24,7 +27,23 @@ impl RiskManager {
             config,
             circuit_breaker,
             pnl_tracker,
+            circuit_breaker_enabled: true,
         }
+    }
+
+    pub fn set_circuit_breaker_enabled(&mut self, enabled: bool) {
+        self.circuit_breaker_enabled = enabled;
+    }
+
+    pub fn circuit_breaker_enabled(&self) -> bool {
+        self.circuit_breaker_enabled
+    }
+
+    /// Reset the circuit breaker state (clear consecutive losses, daily loss,
+    /// cooldowns). Useful for resuming trading after a halt during testing.
+    pub fn reset_circuit_breaker(&mut self) {
+        let equity = self.circuit_breaker.current_equity();
+        self.circuit_breaker = CircuitBreaker::new(self.config.clone(), equity);
     }
 
     /// Validate a trading signal through the full risk pipeline.
@@ -41,8 +60,8 @@ impl RiskManager {
         price: f64,
         now_ms: u64,
     ) -> Option<ValidatedSignal> {
-        // 1. Check circuit breaker
-        if !self.circuit_breaker.can_trade(now_ms) {
+        // 1. Check circuit breaker (unless runtime-disabled for testing)
+        if self.circuit_breaker_enabled && !self.circuit_breaker.can_trade(now_ms) {
             warn!("Risk manager: circuit breaker halted trading");
             return None;
         }

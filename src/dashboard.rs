@@ -130,6 +130,7 @@ struct Snapshot {
     expectancy: f64,
     // Risk
     can_trade: bool,
+    circuit_breaker_enabled: bool,
     consecutive_losses: u32,
     trades_this_hour: u32,
     daily_loss: f64,
@@ -236,6 +237,7 @@ pub async fn start_dashboard(state: DashboardState) {
         .route("/api/signals.csv", get(get_signals_csv))
         .route("/api/console.csv", get(get_console_csv))
         .route("/api/auto_tuner_log", get(get_auto_tuner_log))
+        .route("/api/circuit_breaker", axum::routing::post(set_circuit_breaker))
         .route("/api/debug", get(get_debug))
         .with_state(state);
 
@@ -344,6 +346,35 @@ async fn get_console_csv(State(state): State<DashboardState>) -> impl IntoRespon
     )
 }
 
+// ── REST: Circuit breaker toggle ──────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CircuitBreakerRequest {
+    enabled: bool,
+    /// If true, also reset the circuit breaker state (clear consecutive
+    /// losses, cooldowns, daily loss tracking).
+    #[serde(default)]
+    reset: bool,
+}
+
+async fn set_circuit_breaker(
+    State(state): State<DashboardState>,
+    Json(req): Json<CircuitBreakerRequest>,
+) -> impl IntoResponse {
+    let mut rm = state.risk_manager.lock().await;
+    rm.set_circuit_breaker_enabled(req.enabled);
+    if req.reset {
+        rm.reset_circuit_breaker();
+    }
+    let msg = format!(
+        "Circuit breaker {} (reset={})",
+        if req.enabled { "enabled" } else { "disabled" },
+        req.reset
+    );
+    state.console_log.lock().await.push(msg.clone());
+    (axum::http::StatusCode::OK, msg)
+}
+
 // ── REST: Auto-tuner log tail ─────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -393,7 +424,8 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
     let total_trades = tracker.total_trades();
     let expectancy = sanitize_f64(tracker.expectancy());
 
-    let can_trade = cb.can_trade(now_ms);
+    let cb_enabled = rm.circuit_breaker_enabled();
+    let can_trade = !cb_enabled || cb.can_trade(now_ms);
     let consecutive_losses = cb.consecutive_losses();
     let trades_this_hour = cb.trades_this_hour();
     let daily_loss = sanitize_f64(cb.daily_loss());
@@ -513,6 +545,7 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
         total_trades,
         expectancy,
         can_trade,
+        circuit_breaker_enabled: cb_enabled,
         consecutive_losses,
         trades_this_hour,
         daily_loss,
