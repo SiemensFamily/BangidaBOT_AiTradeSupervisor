@@ -141,11 +141,12 @@ impl EnsembleStrategy {
         };
 
         // Require minimum 2 strategies agreeing — UNLESS a solo signal has
-        // very high conviction (>= 0.5 strength). This allows the bot to act
-        // on strong single-strategy signals when other strategies aren't firing.
+        // VERY high conviction (>= 0.7 strength). This filters out marginal
+        // single-strategy signals that are prone to whipsawing in thin markets
+        // (Kraken Futures order books flip imbalance direction frequently).
         let total_enabled = self.strategies.len();
         let solo_high_conviction = chosen_signals.len() == 1
-            && chosen_signals[0].0.strength >= 0.5;
+            && chosen_signals[0].0.strength >= 0.7;
         if total_enabled > 1 && chosen_signals.len() < 2 && !solo_high_conviction {
             return EvalResult { signal: None, votes };
         }

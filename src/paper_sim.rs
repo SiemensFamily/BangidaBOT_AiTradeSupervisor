@@ -42,6 +42,9 @@ pub async fn run_paper_sim(
     let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
     // Per-symbol open positions for realized PnL tracking
     let mut positions: HashMap<String, OpenPosition> = HashMap::new();
+    // Per-symbol cooldown timestamps (skip new entries until this time)
+    let mut cooldowns: HashMap<String, u64> = HashMap::new();
+    const COOLDOWN_MS: u64 = 60_000; // 60 seconds after a close
 
     loop {
         interval.tick().await;
@@ -104,6 +107,7 @@ pub async fn run_paper_sim(
                         let mut rm = risk_manager.lock().await;
                         rm.on_trade_result(pnl_f64, fees_f64, now_ms);
                     }
+                    cooldowns.insert(sym.clone(), now_ms + COOLDOWN_MS);
 
                     let exit_side = match pos.side {
                         Side::Buy => Side::Sell,
@@ -155,6 +159,23 @@ pub async fn run_paper_sim(
 
             let best_bid = best_bid.unwrap();
             let best_ask = best_ask.unwrap();
+
+            // ── Entry guards ───────────────────────────────────────────
+            // Skip if a cooldown is active for this symbol
+            let now_check = chrono::Utc::now().timestamp_millis() as u64;
+            if let Some(&cd_until) = cooldowns.get(&order.symbol) {
+                if now_check < cd_until {
+                    order_tracker.update(&order.order_id, Decimal::ZERO, Decimal::ZERO, "Cancelled", now_check);
+                    continue;
+                }
+            }
+            // Skip if a same-side position is already open (no averaging)
+            if let Some(pos) = positions.get(&order.symbol) {
+                if pos.side == order.side {
+                    order_tracker.update(&order.order_id, Decimal::ZERO, Decimal::ZERO, "Cancelled", now_check);
+                    continue;
+                }
+            }
 
             let fill_result = match order.order_type {
                 OrderType::Market => {
@@ -228,6 +249,7 @@ pub async fn run_paper_sim(
                         let pnl_f64 = pnl_dec.to_f64().unwrap_or(0.0);
                         if pos.quantity <= Decimal::ZERO {
                             positions.remove(&order.symbol);
+                            cooldowns.insert(order.symbol.clone(), now_ms + COOLDOWN_MS);
                         }
                         pnl_f64
                     }
