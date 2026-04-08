@@ -29,6 +29,7 @@ mod dashboard;
 mod paper_sim;
 mod auto_tuner;
 mod learning;
+mod system_metrics;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -119,6 +120,19 @@ async fn main() -> Result<()> {
         Arc::new(Mutex::new(Vec::new()));
     let learning_state: Arc<Mutex<learning::LearningState>> =
         Arc::new(Mutex::new(learning::LearningState::new()));
+    // Per-symbol price history for live charts (last ~10 minutes at 100ms ticks).
+    // Trimmed to PRICE_HISTORY_MAX entries on each insert.
+    let price_chart_history: Arc<Mutex<HashMap<String, VecDeque<(u64, f64)>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    // Equity history sampled every 5 seconds (last ~30 minutes).
+    let equity_history: Arc<Mutex<VecDeque<(u64, f64)>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
+    // System metrics shared with dashboard
+    let system_metrics_state: Arc<Mutex<system_metrics::SystemMetrics>> =
+        Arc::new(Mutex::new(system_metrics::SystemMetrics::default()));
+    // Dashboard WebSocket broadcast — created here so the metrics sampler
+    // can observe its receiver count alongside the market broadcast.
+    let dashboard_ws_tx: broadcast::Sender<String> = broadcast::channel::<String>(64).0;
     let last_funding_rate: Arc<Mutex<f64>> = Arc::new(Mutex::new(0.0));
     let price_history: Arc<Mutex<HashMap<String, VecDeque<(u64, f64)>>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -187,6 +201,7 @@ async fn main() -> Result<()> {
         let signal_log = signal_log.clone();
         let console_log = console_log.clone();
         let learning_state = learning_state.clone();
+        let price_chart_history = price_chart_history.clone();
         // Build map of config symbol → all possible orderbook keys (including mapped names)
         let mut symbol_lookup: HashMap<String, Vec<String>> = HashMap::new();
         for s in &symbols {
@@ -249,6 +264,19 @@ async fn main() -> Result<()> {
                                 supertrend_up: ctx.supertrend_up,
                             };
                             learning_state.lock().await.tick(&snap);
+                        }
+
+                        // Push to live price chart buffer (1 sample/sec to keep
+                        // memory bounded — most ticks are skipped)
+                        if diag_counter % 10 == 0 {
+                            const PRICE_HISTORY_MAX: usize = 600; // 10 min @ 1Hz
+                            let mid = decimal_to_f64(ctx.last_price);
+                            let mut ph = price_chart_history.lock().await;
+                            let buf = ph.entry(matched_key.clone()).or_insert_with(VecDeque::new);
+                            buf.push_back((ctx.timestamp_ms, mid));
+                            while buf.len() > PRICE_HISTORY_MAX {
+                                buf.pop_front();
+                            }
                         }
 
                         // Periodic diagnostic dump every 30s (300 ticks at 100ms)
@@ -526,6 +554,49 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Equity history sampler — every 5s, push current equity into a rolling
+    // buffer for the dashboard's live equity chart.
+    {
+        let rm = risk_manager.clone();
+        let hist = equity_history.clone();
+        tokio::spawn(async move {
+            const EQUITY_HISTORY_MAX: usize = 720; // 1 hour @ 5s
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                let equity = rm.lock().await.pnl_tracker().equity();
+                let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+                let mut h = hist.lock().await;
+                h.push_back((now_ms, equity));
+                while h.len() > EQUITY_HISTORY_MAX {
+                    h.pop_front();
+                }
+            }
+        });
+    }
+
+    // System metrics sampler — CPU%, RSS memory, listener counts.
+    {
+        let metrics_state = system_metrics_state.clone();
+        let dash_tx = dashboard_ws_tx.clone();
+        let market_tx_clone = market_tx.clone();
+        let dashboard_rx_count: system_metrics::RxCounter =
+            Arc::new(move || dash_tx.receiver_count());
+        let market_rx_count: system_metrics::RxCounter =
+            Arc::new(move || market_tx_clone.receiver_count());
+        let start = chrono::Utc::now().timestamp_millis() as u64;
+        tokio::spawn(async move {
+            info!("System metrics sampler started");
+            system_metrics::run_metrics_sampler(
+                metrics_state,
+                dashboard_rx_count,
+                market_rx_count,
+                start,
+            )
+            .await;
+        });
+    }
+
     // Auto-tuner: heuristic agent that adjusts strategy parameters from
     // recent trade performance every 5 minutes.
     let auto_tuner_state = Arc::new(Mutex::new(auto_tuner::AutoTunerState::default()));
@@ -596,7 +667,7 @@ async fn main() -> Result<()> {
 
     // Task j: Web dashboard
     {
-        let (ws_tx, _) = broadcast::channel::<String>(64);
+        let ws_tx = dashboard_ws_tx.clone();
         let dash_state = dashboard::DashboardState {
             config_mode: config.general.mode.clone(),
             config_symbols: config.trading.symbols.clone(),
@@ -614,6 +685,9 @@ async fn main() -> Result<()> {
             strategy_votes,
             auto_tuner_state,
             learning_state,
+            price_chart_history,
+            equity_history,
+            system_metrics: system_metrics_state.clone(),
             ws_tx,
         };
         tokio::spawn(dashboard::start_dashboard(dash_state));

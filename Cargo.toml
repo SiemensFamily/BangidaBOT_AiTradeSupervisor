@@ -34,6 +34,7 @@ scalper-learning = { path = "crates/scalper-learning" }
 
 tokio = { version = "1", features = ["full"] }
 rand = "0.8"
+sysinfo = "0.32"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"

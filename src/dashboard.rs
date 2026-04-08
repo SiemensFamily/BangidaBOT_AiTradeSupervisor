@@ -23,6 +23,7 @@ use scalper_risk::risk_manager::RiskManager;
 use crate::IndicatorState;
 use crate::auto_tuner::AutoTunerState;
 use crate::learning::LearningState;
+use crate::system_metrics::SystemMetrics;
 use scalper_strategy::StrategyVote;
 
 // ── Trade history ──────────────────────────────────────────────────────────
@@ -108,6 +109,9 @@ pub struct DashboardState {
     pub strategy_votes: Arc<Mutex<Vec<StrategyVote>>>,
     pub auto_tuner_state: Arc<Mutex<AutoTunerState>>,
     pub learning_state: Arc<Mutex<LearningState>>,
+    pub price_chart_history: Arc<Mutex<HashMap<String, VecDeque<(u64, f64)>>>>,
+    pub equity_history: Arc<Mutex<VecDeque<(u64, f64)>>>,
+    pub system_metrics: Arc<Mutex<SystemMetrics>>,
     pub ws_tx: broadcast::Sender<String>,
 }
 
@@ -159,6 +163,29 @@ struct Snapshot {
     auto_tuner: AutoTunerSnap,
     // Learning mode status
     learning: LearningSnap,
+    // System / HUD metrics
+    system: SystemSnap,
+    // Live equity samples (timestamp_ms, equity)
+    equity_chart: Vec<(u64, f64)>,
+    // Per-symbol price chart series (last ~10 minutes)
+    price_charts: Vec<PriceChartSeries>,
+}
+
+#[derive(Serialize)]
+struct SystemSnap {
+    cpu_percent: f32,
+    memory_mb: f64,
+    virtual_memory_mb: f64,
+    uptime_secs: u64,
+    dashboard_subscribers: usize,
+    market_subscribers: usize,
+    connected_exchanges: usize,
+}
+
+#[derive(Serialize)]
+struct PriceChartSeries {
+    symbol: String,
+    points: Vec<(u64, f64)>,
 }
 
 #[derive(Serialize)]
@@ -822,6 +849,37 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
     };
     drop(ls);
 
+    // System metrics snapshot
+    let sm = state.system_metrics.lock().await;
+    let connected_count = state.connected_exchanges.lock().await.len();
+    let system = SystemSnap {
+        cpu_percent: sm.cpu_percent,
+        memory_mb: sm.memory_mb,
+        virtual_memory_mb: sm.virtual_memory_mb,
+        uptime_secs: sm.uptime_secs,
+        dashboard_subscribers: sm.dashboard_subscribers,
+        market_subscribers: sm.market_subscribers,
+        connected_exchanges: connected_count,
+    };
+    drop(sm);
+
+    // Equity chart series (clone trimmed)
+    let equity_chart: Vec<(u64, f64)> = {
+        let h = state.equity_history.lock().await;
+        h.iter().copied().collect()
+    };
+
+    // Price chart series per symbol
+    let price_charts: Vec<PriceChartSeries> = {
+        let ph = state.price_chart_history.lock().await;
+        ph.iter()
+            .map(|(sym, buf)| PriceChartSeries {
+                symbol: sym.clone(),
+                points: buf.iter().copied().collect(),
+            })
+            .collect()
+    };
+
     Snapshot {
         timestamp_ms: now_ms,
         mode: state.config_mode.clone(),
@@ -857,5 +915,8 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
         strategy_status,
         auto_tuner,
         learning,
+        system,
+        equity_chart,
+        price_charts,
     }
 }
