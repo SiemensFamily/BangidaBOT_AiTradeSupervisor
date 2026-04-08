@@ -269,7 +269,9 @@ pub async fn start_dashboard(state: DashboardState) {
         .route("/api/circuit_breaker", axum::routing::post(set_circuit_breaker))
         .route("/api/learning", get(get_learning))
         .route("/api/learning/enabled", axum::routing::post(set_learning_enabled))
+        .route("/api/learning/promote", axum::routing::post(promote_best))
         .route("/api/learning/history", get(get_learning_history))
+        .route("/api/restart", axum::routing::post(restart_bot))
         .route("/api/debug", get(get_debug))
         .with_state(state);
 
@@ -486,6 +488,159 @@ async fn set_learning_enabled(
     let msg = format!("Learning mode {}", if req.enabled { "enabled" } else { "disabled" });
     state.console_log.lock().await.push(msg.clone());
     (axum::http::StatusCode::OK, msg)
+}
+
+#[derive(Serialize)]
+struct PromoteResponse {
+    ok: bool,
+    message: String,
+    applied: Vec<String>,
+    skipped: Vec<String>,
+    candidate_id: Option<u32>,
+    fitness: f64,
+    net_pnl: f64,
+}
+
+/// Promote the best candidate's genome to the live config.
+///
+/// 5 of the 8 genes map to existing production config fields — those are
+/// written into shared_config and persisted to config/default.toml. The
+/// remaining 3 (adx_min, use_supertrend_filter, max_hold_secs) don't yet
+/// have production strategy hooks and are reported as skipped.
+///
+/// Strategies are built once at startup, so the promoted values take effect
+/// on the next restart — same behavior as the auto-tuner and the Settings
+/// Save button. The dashboard should communicate this to the user.
+async fn promote_best(State(state): State<DashboardState>) -> (axum::http::StatusCode, Json<PromoteResponse>) {
+    // Snapshot the best candidate
+    let (best_id, best_fitness, best_pnl, best_genome) = {
+        let ls = state.learning_state.lock().await;
+        match ls.population.best() {
+            Some(c) => (c.id, c.fitness(), c.net_pnl, c.genome.clone()),
+            None => {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(PromoteResponse {
+                        ok: false,
+                        message: "No candidates in population".to_string(),
+                        applied: vec![],
+                        skipped: vec![],
+                        candidate_id: None,
+                        fitness: 0.0,
+                        net_pnl: 0.0,
+                    }),
+                );
+            }
+        }
+    };
+
+    if best_fitness <= 0.0 {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(PromoteResponse {
+                ok: false,
+                message: "Best candidate has zero fitness — nothing to promote. Let learning run until candidates have completed at least 5 trades.".to_string(),
+                applied: vec![],
+                skipped: vec![],
+                candidate_id: Some(best_id),
+                fitness: best_fitness,
+                net_pnl: best_pnl,
+            }),
+        );
+    }
+
+    // Apply the 5 mapped genes to shared_config
+    let applied = {
+        let mut cfg = state.config.write().await;
+        let mut applied = Vec::new();
+
+        cfg.strategy.ob_imbalance.imbalance_threshold = best_genome.imbalance_threshold;
+        applied.push(format!("ob_imbalance.imbalance_threshold = {:.3}", best_genome.imbalance_threshold));
+
+        cfg.strategy.ob_imbalance.take_profit_ticks = best_genome.take_profit_ticks;
+        applied.push(format!("ob_imbalance.take_profit_ticks = {}", best_genome.take_profit_ticks));
+
+        cfg.strategy.ob_imbalance.stop_loss_ticks = best_genome.stop_loss_ticks;
+        applied.push(format!("ob_imbalance.stop_loss_ticks = {}", best_genome.stop_loss_ticks));
+
+        cfg.strategy.momentum.rsi_oversold = best_genome.rsi_oversold;
+        applied.push(format!("momentum.rsi_oversold = {:.1}", best_genome.rsi_oversold));
+
+        cfg.strategy.momentum.rsi_overbought = best_genome.rsi_overbought;
+        applied.push(format!("momentum.rsi_overbought = {:.1}", best_genome.rsi_overbought));
+
+        applied
+    };
+
+    let skipped = vec![
+        format!("adx_min ({:.1}) — no production strategy uses ADX yet", best_genome.adx_min),
+        format!("use_supertrend_filter ({}) — no production strategy uses Supertrend yet", best_genome.use_supertrend_filter),
+        format!("max_hold_secs ({}) — paper_sim hardcoded, not in config", best_genome.max_hold_secs),
+    ];
+
+    // Persist to disk
+    let persist_result = {
+        let cfg = state.config.read().await;
+        toml::to_string_pretty(&*cfg)
+            .map_err(|e| e.to_string())
+            .and_then(|s| std::fs::write("config/default.toml", s).map_err(|e| e.to_string()))
+    };
+
+    let message = match persist_result {
+        Ok(()) => format!(
+            "Promoted candidate #{} (fitness {:.2}, PnL ${:.2}). {} genes applied to shared config and persisted to config/default.toml. Restart the bot for live strategies to pick up the new values.",
+            best_id, best_fitness, best_pnl, applied.len()
+        ),
+        Err(e) => format!(
+            "Promoted to shared config, but persist failed: {}. Config will revert on restart.",
+            e
+        ),
+    };
+
+    state.console_log.lock().await.push(format!("Learning: {}", message));
+
+    (
+        axum::http::StatusCode::OK,
+        Json(PromoteResponse {
+            ok: true,
+            message,
+            applied,
+            skipped,
+            candidate_id: Some(best_id),
+            fitness: best_fitness,
+            net_pnl: best_pnl,
+        }),
+    )
+}
+
+/// Restart the bot by re-executing the current binary. On Unix this uses
+/// execv so the terminal session stays attached. On failure, exits cleanly
+/// and the user re-runs `cargo run --release` manually.
+///
+/// The endpoint returns 200 immediately, then schedules the exec 300ms later
+/// so the HTTP response reaches the browser before the process swap.
+async fn restart_bot(State(state): State<DashboardState>) -> impl IntoResponse {
+    state
+        .console_log
+        .lock()
+        .await
+        .push("Restart requested via dashboard — re-executing in 300ms".to_string());
+
+    tokio::spawn(async {
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            if let Ok(exe) = std::env::current_exe() {
+                let args: Vec<String> = std::env::args().skip(1).collect();
+                let err = std::process::Command::new(exe).args(&args).exec();
+                tracing::error!("restart exec failed: {}", err);
+            }
+        }
+        std::process::exit(0);
+    });
+
+    (axum::http::StatusCode::OK, "Restarting in 300ms")
 }
 
 #[derive(Serialize)]

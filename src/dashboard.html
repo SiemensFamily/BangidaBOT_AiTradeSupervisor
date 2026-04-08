@@ -298,7 +298,9 @@
                 <div style="font-size:0.78em;color:#8b949e;">Population shadow-evaluates against the live market. Best parameters can be promoted to live config.</div>
             </div>
             <div style="display:flex;gap:8px;">
+                <button class="btn" id="learnPromoteBtn" onclick="promoteBest()">Promote Best to Live</button>
                 <button class="btn" id="learnToggleBtn" onclick="toggleLearning()">Pause</button>
+                <button class="btn" onclick="restartBot()" style="background:#d29922;color:#000;">Restart Bot</button>
             </div>
         </div>
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;">
@@ -462,9 +464,10 @@
             <div class="save-bar">
                 <button class="btn btn-primary" onclick="saveConfig()">Save Configuration</button>
                 <button class="btn" onclick="loadConfig()">Reload</button>
+                <button class="btn" onclick="restartBot()" style="background:#d29922;color:#000;">Restart Bot</button>
                 <span id="saveToast"></span>
             </div>
-            <p style="color:#8b949e;font-size:0.78em;margin-top:10px;">Changes are saved to config/default.toml. Some changes require a restart to take full effect.</p>
+            <p style="color:#8b949e;font-size:0.78em;margin-top:10px;">Changes are saved to config/default.toml. Most changes require Restart Bot to take effect (strategies are built once at startup).</p>
         </div>
     </div>
 
@@ -888,6 +891,79 @@ async function toggleLearning() {
     } catch (e) {
         alert('Error: ' + e);
     }
+}
+
+async function promoteBest() {
+    const ok = confirm(
+        'Promote the best candidate\'s genome to the live config?\n\n' +
+        '• 5 genes (imbalance_threshold, TP/SL ticks, RSI bounds) will be written to config/default.toml\n' +
+        '• 3 genes (adx_min, supertrend filter, max hold) have no production hook yet and will be skipped\n' +
+        '• You must RESTART the bot for the live strategies to pick up the new values'
+    );
+    if (!ok) return;
+    try {
+        const r = await fetch('/api/learning/promote', { method: 'POST' });
+        const data = await r.json();
+        if (!r.ok || !data.ok) {
+            alert('Promote failed: ' + (data.message || 'unknown'));
+            return;
+        }
+        let detail = data.message + '\n\nApplied:\n';
+        detail += data.applied.map(s => '  ✓ ' + s).join('\n');
+        if (data.skipped && data.skipped.length > 0) {
+            detail += '\n\nSkipped:\n';
+            detail += data.skipped.map(s => '  – ' + s).join('\n');
+        }
+        alert(detail);
+    } catch (e) {
+        alert('Error: ' + e);
+    }
+}
+
+async function restartBot() {
+    const ok = confirm(
+        'Restart the bot?\n\n' +
+        'The running process will be replaced by a fresh instance. ' +
+        'The dashboard will auto-reconnect in about 10 seconds. ' +
+        'This is for CONFIG changes only — for CODE changes, stop the bot manually and run cargo build && cargo run --release.'
+    );
+    if (!ok) return;
+    // Show overlay
+    let overlay = document.getElementById('restartOverlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'restartOverlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(13,17,23,0.92);z-index:9999;display:flex;align-items:center;justify-content:center;flex-direction:column;font-family:system-ui,sans-serif;color:#c9d1d9;';
+        overlay.innerHTML = '<div style="font-size:1.4em;color:#d29922;margin-bottom:16px;">Restarting bot...</div>' +
+                            '<div id="restartCountdown" style="font-size:0.9em;color:#8b949e;">Reconnecting in <span id="restartCountdownNum">10</span>s</div>';
+        document.body.appendChild(overlay);
+    } else {
+        overlay.style.display = 'flex';
+    }
+    try {
+        await fetch('/api/restart', { method: 'POST' });
+    } catch (e) {
+        // Expected — the server disappears mid-response
+    }
+    // Countdown + poll for the server to come back
+    let remaining = 10;
+    const numEl = document.getElementById('restartCountdownNum');
+    const timer = setInterval(async () => {
+        remaining -= 1;
+        if (numEl) numEl.textContent = Math.max(0, remaining);
+        if (remaining <= 0) {
+            // Poll a quick endpoint; reload the page when it responds
+            try {
+                const r = await fetch('/api/debug', { cache: 'no-store' });
+                if (r.ok) {
+                    clearInterval(timer);
+                    location.reload();
+                }
+            } catch (e) {
+                // Still down — keep polling
+            }
+        }
+    }, 1000);
 }
 
 /* ── Circuit breaker controls ── */
