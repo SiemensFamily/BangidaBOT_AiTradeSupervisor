@@ -391,6 +391,350 @@ impl Indicator for OBV {
 }
 
 // ---------------------------------------------------------------------------
+// Stochastic Oscillator (%K, %D)
+// ---------------------------------------------------------------------------
+#[derive(Debug, Clone)]
+pub struct Stochastic {
+    period: usize,
+    smooth_k: usize,
+    smooth_d: usize,
+    highs: RingBuffer<f64>,
+    lows: RingBuffer<f64>,
+    closes: RingBuffer<f64>,
+    k_history: RingBuffer<f64>,
+    d_history: RingBuffer<f64>,
+    raw_k: f64,
+    k: f64,
+    d: f64,
+}
+
+impl Stochastic {
+    pub fn new(period: usize, smooth_k: usize, smooth_d: usize) -> Self {
+        Self {
+            period,
+            smooth_k,
+            smooth_d,
+            highs: RingBuffer::new(period),
+            lows: RingBuffer::new(period),
+            closes: RingBuffer::new(period),
+            k_history: RingBuffer::new(smooth_k),
+            d_history: RingBuffer::new(smooth_d),
+            raw_k: 50.0,
+            k: 50.0,
+            d: 50.0,
+        }
+    }
+
+    pub fn update_ohlc(&mut self, high: f64, low: f64, close: f64) {
+        self.highs.push(high);
+        self.lows.push(low);
+        self.closes.push(close);
+        if self.highs.len() < self.period { return; }
+        let hh = self.highs.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let ll = self.lows.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        self.raw_k = if hh > ll { 100.0 * (close - ll) / (hh - ll) } else { 50.0 };
+        self.k_history.push(self.raw_k);
+        if self.k_history.len() >= self.smooth_k {
+            let sum: f64 = self.k_history.iter().sum();
+            self.k = sum / self.k_history.len() as f64;
+            self.d_history.push(self.k);
+            if self.d_history.len() >= self.smooth_d {
+                let dsum: f64 = self.d_history.iter().sum();
+                self.d = dsum / self.d_history.len() as f64;
+            }
+        }
+    }
+
+    pub fn k(&self) -> f64 { self.k }
+    pub fn d(&self) -> f64 { self.d }
+    pub fn is_ready(&self) -> bool {
+        self.k_history.len() >= self.smooth_k && self.d_history.len() >= self.smooth_d
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stochastic RSI — Stochastic applied to RSI values
+// ---------------------------------------------------------------------------
+#[derive(Debug, Clone)]
+pub struct StochRSI {
+    rsi: RSI,
+    rsi_history: RingBuffer<f64>,
+    period: usize,
+    value: f64,
+}
+
+impl StochRSI {
+    pub fn new(rsi_period: usize, stoch_period: usize) -> Self {
+        Self {
+            rsi: RSI::new(rsi_period),
+            rsi_history: RingBuffer::new(stoch_period),
+            period: stoch_period,
+            value: 50.0,
+        }
+    }
+
+    pub fn update(&mut self, price: f64) {
+        self.rsi.update(price);
+        if !self.rsi.is_ready() { return; }
+        let r = self.rsi.value();
+        self.rsi_history.push(r);
+        if self.rsi_history.len() >= self.period {
+            let hh = self.rsi_history.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+            let ll = self.rsi_history.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+            self.value = if hh > ll { 100.0 * (r - ll) / (hh - ll) } else { 50.0 };
+        }
+    }
+
+    pub fn value(&self) -> f64 { self.value }
+    pub fn is_ready(&self) -> bool {
+        self.rsi.is_ready() && self.rsi_history.len() >= self.period
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CCI — Commodity Channel Index
+// ---------------------------------------------------------------------------
+#[derive(Debug, Clone)]
+pub struct CCI {
+    period: usize,
+    tp_history: RingBuffer<f64>,
+    value: f64,
+}
+
+impl CCI {
+    pub fn new(period: usize) -> Self {
+        Self { period, tp_history: RingBuffer::new(period), value: 0.0 }
+    }
+
+    pub fn update_ohlc(&mut self, high: f64, low: f64, close: f64) {
+        let tp = (high + low + close) / 3.0;
+        self.tp_history.push(tp);
+        if self.tp_history.len() < self.period { return; }
+        let sma: f64 = self.tp_history.iter().sum::<f64>() / self.period as f64;
+        let mean_dev: f64 = self.tp_history.iter()
+            .map(|&v| (v - sma).abs())
+            .sum::<f64>() / self.period as f64;
+        self.value = if mean_dev > 0.0 { (tp - sma) / (0.015 * mean_dev) } else { 0.0 };
+    }
+
+    pub fn value(&self) -> f64 { self.value }
+    pub fn is_ready(&self) -> bool { self.tp_history.len() >= self.period }
+}
+
+// ---------------------------------------------------------------------------
+// ADX — Average Directional Index (Wilder)
+// ---------------------------------------------------------------------------
+#[derive(Debug, Clone)]
+pub struct ADX {
+    period: usize,
+    prev_high: Option<f64>,
+    prev_low: Option<f64>,
+    prev_close: Option<f64>,
+    smoothed_tr: f64,
+    smoothed_plus_dm: f64,
+    smoothed_minus_dm: f64,
+    dx_history: RingBuffer<f64>,
+    adx: f64,
+    count: usize,
+}
+
+impl ADX {
+    pub fn new(period: usize) -> Self {
+        Self {
+            period,
+            prev_high: None,
+            prev_low: None,
+            prev_close: None,
+            smoothed_tr: 0.0,
+            smoothed_plus_dm: 0.0,
+            smoothed_minus_dm: 0.0,
+            dx_history: RingBuffer::new(period),
+            adx: 0.0,
+            count: 0,
+        }
+    }
+
+    pub fn update_ohlc(&mut self, high: f64, low: f64, close: f64) {
+        if let (Some(ph), Some(pl), Some(pc)) = (self.prev_high, self.prev_low, self.prev_close) {
+            let tr = (high - low).max((high - pc).abs()).max((low - pc).abs());
+            let up = high - ph;
+            let down = pl - low;
+            let plus_dm = if up > down && up > 0.0 { up } else { 0.0 };
+            let minus_dm = if down > up && down > 0.0 { down } else { 0.0 };
+
+            self.count += 1;
+            if self.count <= self.period {
+                self.smoothed_tr += tr;
+                self.smoothed_plus_dm += plus_dm;
+                self.smoothed_minus_dm += minus_dm;
+            } else {
+                let p = self.period as f64;
+                self.smoothed_tr = self.smoothed_tr - (self.smoothed_tr / p) + tr;
+                self.smoothed_plus_dm = self.smoothed_plus_dm - (self.smoothed_plus_dm / p) + plus_dm;
+                self.smoothed_minus_dm = self.smoothed_minus_dm - (self.smoothed_minus_dm / p) + minus_dm;
+            }
+
+            if self.smoothed_tr > 0.0 && self.count >= self.period {
+                let plus_di = 100.0 * self.smoothed_plus_dm / self.smoothed_tr;
+                let minus_di = 100.0 * self.smoothed_minus_dm / self.smoothed_tr;
+                let di_sum = plus_di + minus_di;
+                let dx = if di_sum > 0.0 { 100.0 * (plus_di - minus_di).abs() / di_sum } else { 0.0 };
+                self.dx_history.push(dx);
+                if self.dx_history.len() >= self.period {
+                    let avg: f64 = self.dx_history.iter().sum::<f64>() / self.dx_history.len() as f64;
+                    self.adx = avg;
+                }
+            }
+        }
+        self.prev_high = Some(high);
+        self.prev_low = Some(low);
+        self.prev_close = Some(close);
+    }
+
+    pub fn value(&self) -> f64 { self.adx }
+    pub fn is_ready(&self) -> bool { self.dx_history.len() >= self.period }
+}
+
+// ---------------------------------------------------------------------------
+// Parabolic SAR
+// ---------------------------------------------------------------------------
+#[derive(Debug, Clone)]
+pub struct ParabolicSAR {
+    af_start: f64,
+    af_step: f64,
+    af_max: f64,
+    af: f64,
+    sar: f64,
+    ep: f64,        // extreme point
+    is_long: bool,
+    initialized: bool,
+}
+
+impl ParabolicSAR {
+    pub fn new() -> Self {
+        Self {
+            af_start: 0.02,
+            af_step: 0.02,
+            af_max: 0.20,
+            af: 0.02,
+            sar: 0.0,
+            ep: 0.0,
+            is_long: true,
+            initialized: false,
+        }
+    }
+
+    pub fn update_hl(&mut self, high: f64, low: f64) {
+        if !self.initialized {
+            self.sar = low;
+            self.ep = high;
+            self.is_long = true;
+            self.af = self.af_start;
+            self.initialized = true;
+            return;
+        }
+        let new_sar = self.sar + self.af * (self.ep - self.sar);
+        if self.is_long {
+            if low < new_sar {
+                // flip to short
+                self.is_long = false;
+                self.sar = self.ep;
+                self.ep = low;
+                self.af = self.af_start;
+            } else {
+                self.sar = new_sar;
+                if high > self.ep {
+                    self.ep = high;
+                    self.af = (self.af + self.af_step).min(self.af_max);
+                }
+            }
+        } else {
+            if high > new_sar {
+                // flip to long
+                self.is_long = true;
+                self.sar = self.ep;
+                self.ep = high;
+                self.af = self.af_start;
+            } else {
+                self.sar = new_sar;
+                if low < self.ep {
+                    self.ep = low;
+                    self.af = (self.af + self.af_step).min(self.af_max);
+                }
+            }
+        }
+    }
+
+    pub fn value(&self) -> f64 { self.sar }
+    pub fn is_long(&self) -> bool { self.is_long }
+    pub fn is_ready(&self) -> bool { self.initialized }
+}
+
+impl Default for ParabolicSAR {
+    fn default() -> Self { Self::new() }
+}
+
+// ---------------------------------------------------------------------------
+// Supertrend (ATR-based trailing trend)
+// ---------------------------------------------------------------------------
+#[derive(Debug, Clone)]
+pub struct Supertrend {
+    multiplier: f64,
+    atr: ATR,
+    upper: f64,
+    lower: f64,
+    trend_up: bool,
+    value: f64,
+    initialized: bool,
+}
+
+impl Supertrend {
+    pub fn new(atr_period: usize, multiplier: f64) -> Self {
+        Self {
+            multiplier,
+            atr: ATR::new(atr_period),
+            upper: 0.0,
+            lower: 0.0,
+            trend_up: true,
+            value: 0.0,
+            initialized: false,
+        }
+    }
+
+    pub fn update_ohlc(&mut self, high: f64, low: f64, close: f64, prev_close: f64) {
+        self.atr.update_ohlc(high, low, prev_close);
+        if !self.atr.is_ready() { return; }
+        let mid = (high + low) / 2.0;
+        let band = self.multiplier * self.atr.value();
+        let basic_upper = mid + band;
+        let basic_lower = mid - band;
+        if !self.initialized {
+            self.upper = basic_upper;
+            self.lower = basic_lower;
+            self.trend_up = close > basic_upper;
+            self.initialized = true;
+        } else {
+            self.upper = if basic_upper < self.upper || prev_close > self.upper {
+                basic_upper
+            } else { self.upper };
+            self.lower = if basic_lower > self.lower || prev_close < self.lower {
+                basic_lower
+            } else { self.lower };
+            if self.trend_up && close < self.lower {
+                self.trend_up = false;
+            } else if !self.trend_up && close > self.upper {
+                self.trend_up = true;
+            }
+        }
+        self.value = if self.trend_up { self.lower } else { self.upper };
+    }
+
+    pub fn value(&self) -> f64 { self.value }
+    pub fn trend_up(&self) -> bool { self.trend_up }
+    pub fn is_ready(&self) -> bool { self.initialized && self.atr.is_ready() }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 #[cfg(test)]

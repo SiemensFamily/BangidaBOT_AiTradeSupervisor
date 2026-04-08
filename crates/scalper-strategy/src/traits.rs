@@ -29,6 +29,17 @@ pub struct MarketContext {
     pub atr_14: f64,
     pub obv: f64,
 
+    // Extended indicators
+    pub stoch_k: f64,           // Stochastic %K (0-100)
+    pub stoch_d: f64,           // Stochastic %D (0-100)
+    pub stoch_rsi: f64,         // StochRSI (0-100)
+    pub cci_20: f64,            // Commodity Channel Index (typically -200..+200)
+    pub adx_14: f64,            // Average Directional Index (0-100, >25 = strong trend)
+    pub psar: f64,              // Parabolic SAR price
+    pub psar_long: bool,        // PSAR currently in long mode
+    pub supertrend: f64,        // Supertrend line price
+    pub supertrend_up: bool,    // Supertrend currently bullish
+
     // Order flow
     pub cvd: f64,
     pub volume_ratio: f64,

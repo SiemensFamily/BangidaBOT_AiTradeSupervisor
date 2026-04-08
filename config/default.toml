@@ -43,10 +43,10 @@ max_leverage = 20
 
 # Risk management — tuned for $100 starting capital
 [risk]
-max_risk_per_trade_pct = 1.0      # $1 risk per trade (was 3.0 — too aggressive given losing streak)
+max_risk_per_trade_pct = 0.50     # Locked in from auto-tuner (was 1.0)
 max_daily_loss_pct = 10.0         # $10 max daily loss
 max_drawdown_pct = 25.0           # 25% peak drawdown limit
-max_consecutive_losses = 3        # 3 losses = 15min cooldown
+max_consecutive_losses = 10       # Locked in from Settings adjustment (was 3)
 cooldown_minutes = 15             # Short recovery for rapid growth
 min_equity = 25.0                 # Hard floor — stop trading at $25
 max_open_positions = 1            # One trade at a time (capital constraint)
@@ -70,9 +70,9 @@ rsi_oversold = 20.0
 [strategy.ob_imbalance]
 enabled = true
 weight = 0.25                     # SECONDARY strategy
-imbalance_threshold = 0.35        # Was 0.50 — more entries; we have edge so trade more
-take_profit_ticks = 8             # Raised from 3 — give trades room to run past spread noise
-stop_loss_ticks = 5               # Raised from 2 — wider stop to survive bid/ask wiggle (R:R = 1.6)
+imbalance_threshold = 0.70        # Locked in from auto-tuner (was 0.35)
+take_profit_ticks = 17            # Locked in from auto-tuner (was 8)
+stop_loss_ticks = 5               # Same — auto-tuner only adjusts TP
 
 [strategy.liquidation_wick]
 enabled = false                   # DISABLED — Kraken WS doesn't send liquidation events, never fires

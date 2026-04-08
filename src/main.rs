@@ -781,6 +781,13 @@ pub(crate) struct IndicatorState {
     vwap: Option<VWAP>,
     atr: Option<ATR>,
     obv: Option<OBV>,
+    // New: extended indicators (Stochastic, StochRSI, CCI, ADX, ParabolicSAR, Supertrend)
+    stoch: Stochastic,
+    stoch_rsi: StochRSI,
+    cci: CCI,
+    adx: ADX,
+    psar: ParabolicSAR,
+    supertrend: Supertrend,
     last_close: Option<f64>,
 }
 
@@ -795,6 +802,12 @@ impl IndicatorState {
             vwap: Some(VWAP::new()),
             atr: Some(ATR::new(14)),
             obv: Some(OBV::new()),
+            stoch: Stochastic::new(14, 3, 3),
+            stoch_rsi: StochRSI::new(14, 14),
+            cci: CCI::new(20),
+            adx: ADX::new(14),
+            psar: ParabolicSAR::new(),
+            supertrend: Supertrend::new(10, 3.0),
             last_close: None,
         }
     }
@@ -802,7 +815,7 @@ impl IndicatorState {
     /// Returns (ready_count, total_count) for warmup progress.
     pub fn readiness(&self) -> (u32, u32) {
         let mut ready = 0u32;
-        let total = 8u32;
+        let total = 14u32;
         if self.rsi.as_ref().map_or(false, |i| i.is_ready()) { ready += 1; }
         if self.ema_9.as_ref().map_or(false, |i| i.is_ready()) { ready += 1; }
         if self.ema_21.as_ref().map_or(false, |i| i.is_ready()) { ready += 1; }
@@ -811,6 +824,12 @@ impl IndicatorState {
         if self.vwap.as_ref().map_or(false, |i| i.is_ready()) { ready += 1; }
         if self.atr.as_ref().map_or(false, |i| i.is_ready()) { ready += 1; }
         if self.obv.as_ref().map_or(false, |i| i.is_ready()) { ready += 1; }
+        if self.stoch.is_ready() { ready += 1; }
+        if self.stoch_rsi.is_ready() { ready += 1; }
+        if self.cci.is_ready() { ready += 1; }
+        if self.adx.is_ready() { ready += 1; }
+        if self.psar.is_ready() { ready += 1; }
+        if self.supertrend.is_ready() { ready += 1; }
         (ready, total)
     }
 
@@ -830,6 +849,7 @@ impl IndicatorState {
         if let Some(ref mut bb) = self.bb {
             bb.update(price);
         }
+        self.stoch_rsi.update(price);
         self.last_close = Some(price);
     }
 
@@ -844,6 +864,11 @@ impl IndicatorState {
         if let Some(ref mut vwap) = self.vwap {
             vwap.update_with_volume(close, volume);
         }
+        self.stoch.update_ohlc(high, low, close);
+        self.cci.update_ohlc(high, low, close);
+        self.adx.update_ohlc(high, low, close);
+        self.psar.update_hl(high, low);
+        self.supertrend.update_ohlc(high, low, close, prev_close);
         self.last_close = Some(close);
     }
 }
@@ -1109,6 +1134,15 @@ async fn build_market_context(
         vwap: vwap_val,
         atr_14: atr_val,
         obv: obv_val,
+        stoch_k: ind.stoch.k(),
+        stoch_d: ind.stoch.d(),
+        stoch_rsi: ind.stoch_rsi.value(),
+        cci_20: ind.cci.value(),
+        adx_14: ind.adx.value(),
+        psar: ind.psar.value(),
+        psar_long: ind.psar.is_long(),
+        supertrend: ind.supertrend.value(),
+        supertrend_up: ind.supertrend.trend_up(),
         cvd: of.cvd_short(),
         volume_ratio: of.volume_ratio(),
         liquidation_volume_1m: of.liquidation_volume_1m(),

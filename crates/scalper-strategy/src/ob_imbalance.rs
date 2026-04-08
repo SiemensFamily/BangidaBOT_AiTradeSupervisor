@@ -158,6 +158,15 @@ mod tests {
             funding_rate_secondary: 0.001,
             open_interest: None,
             price_velocity_30s: 0.0,
+            stoch_k: 50.0,
+            stoch_d: 50.0,
+            stoch_rsi: 50.0,
+            cci_20: 0.0,
+            adx_14: 20.0,
+            psar: 0.0,
+            psar_long: true,
+            supertrend: 0.0,
+            supertrend_up: true,
             timestamp_ms: 1000000,
         }
     }
