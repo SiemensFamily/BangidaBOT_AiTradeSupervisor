@@ -3813,13 +3813,18 @@ dependencies = [
 name = "scalper-backtest"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "chrono",
+ "reqwest",
  "rust_decimal",
  "rust_decimal_macros",
  "scalper-core",
  "scalper-data",
  "scalper-risk",
  "scalper-strategy",
+ "serde",
+ "serde_json",
+ "tokio",
  "tracing",
 ]
 
