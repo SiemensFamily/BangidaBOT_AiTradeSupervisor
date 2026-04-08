@@ -39,6 +39,7 @@ struct Args {
     top_n: usize,
     strategy_set: String, // "momentum_ob" | "mean_reversion" | "all"
     from_file: Option<String>,
+    walk_forward: bool,
 }
 
 impl Args {
@@ -54,6 +55,7 @@ impl Args {
         let mut top_n: usize = 10;
         let mut strategy_set = "momentum_ob".to_string();
         let mut from_file: Option<String> = None;
+        let mut walk_forward = false;
 
         let args: Vec<String> = std::env::args().skip(1).collect();
         let mut i = 0;
@@ -92,6 +94,11 @@ impl Args {
                 "--from-file" => {
                     if let Some(v) = args.get(i + 1) { from_file = Some(v.clone()); i += 2; continue; }
                 }
+                "--walk-forward" => {
+                    walk_forward = true;
+                    i += 1;
+                    continue;
+                }
                 "--help" | "-h" => { print_help(); std::process::exit(0); }
                 _ => { i += 1; }
             }
@@ -100,6 +107,7 @@ impl Args {
         Self {
             symbol, resolution, days, notional, max_hold_bars,
             mode, venue, min_trades, top_n, strategy_set, from_file,
+            walk_forward,
         }
     }
 }
@@ -124,6 +132,11 @@ OPTIONS:
       --strategies <SET>   momentum_ob | mean_reversion | all (default: momentum_ob)
       --from-file <PATH>   Load candles from a local JSON file instead of
                            fetching from the venue
+      --walk-forward       Split the candles 50/50, run the full grid on
+                           BOTH halves, and rank by min(pf_train, pf_test).
+                           This is the only honest way to validate edge:
+                           a combo that works on the first half but dies
+                           on the second is overfit, not real.
   -h, --help               Show this help
 
 EXAMPLES:
@@ -163,6 +176,25 @@ struct SweepRow {
     max_drawdown_pct: f64,
     sharpe: f64,
     expectancy: f64,
+}
+
+/// Paired result from running the same params on both halves of the
+/// candle series. Used by --walk-forward.
+#[derive(Debug, Clone)]
+struct WalkForwardRow {
+    first: SweepRow,
+    second: SweepRow,
+}
+
+impl WalkForwardRow {
+    /// The key metric for walk-forward ranking: the worse of the two
+    /// halves' profit factors. Penalizes any combo that only worked in
+    /// one regime. Infinite / NaN collapse to 0 so they never win.
+    fn worst_pf(&self) -> f64 {
+        let a = if self.first.profit_factor.is_finite() { self.first.profit_factor } else { 0.0 };
+        let b = if self.second.profit_factor.is_finite() { self.second.profit_factor } else { 0.0 };
+        a.min(b)
+    }
 }
 
 impl SweepRow {
@@ -367,6 +399,214 @@ fn build_ensemble(cfg: &StrategyConfig, set: &str) -> EnsembleStrategy {
     EnsembleStrategy::new(strategies, cfg.ensemble_threshold)
 }
 
+/// Render the walk-forward results and save a CSV with both halves.
+fn display_walk_forward(wf_rows: &[WalkForwardRow], args: &Args, venue: Venue) {
+    // Trade-count + PF distribution on the FIRST half only (for context —
+    // the first half is what we'd have used to "train").
+    println!("First-half trade count distribution across all {} combos:", wf_rows.len());
+    let buckets = [
+        (0_u64, 0_u64, "0 trades (dead)"),
+        (1, 4, "1-4 trades"),
+        (5, 9, "5-9 trades"),
+        (10, 19, "10-19 trades"),
+        (20, 49, "20-49 trades"),
+        (50, 99, "50-99 trades"),
+        (100, u64::MAX, "100+ trades"),
+    ];
+    for (lo, hi, label) in buckets {
+        let rows: Vec<&WalkForwardRow> = wf_rows
+            .iter()
+            .filter(|r| r.first.total_trades >= lo && r.first.total_trades <= hi)
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        let best_pf = rows
+            .iter()
+            .filter(|_| lo > 0)
+            .map(|r| if r.first.profit_factor.is_finite() { r.first.profit_factor } else { 0.0 })
+            .fold(f64::NEG_INFINITY, f64::max);
+        if lo > 0 && best_pf.is_finite() {
+            println!(
+                "  {:<20} {:>6} combos    best first-half PF: {:.2}",
+                label,
+                rows.len(),
+                best_pf
+            );
+        } else {
+            println!("  {:<20} {:>6} combos", label, rows.len());
+        }
+    }
+    println!();
+
+    // Filter: only keep combos with sufficient trades in BOTH halves.
+    let half_min = (args.min_trades / 2).max(2);
+    let mut qualified: Vec<&WalkForwardRow> = wf_rows
+        .iter()
+        .filter(|r| r.first.total_trades >= half_min && r.second.total_trades >= half_min)
+        .collect();
+    // Sort by the worst of the two halves' profit factors (robust to regime).
+    qualified.sort_by(|a, b| {
+        b.worst_pf()
+            .partial_cmp(&a.worst_pf())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    println!(
+        "─────── WALK-FORWARD TOP {} (of {} qualified, min {} trades per half) ───────",
+        args.top_n.min(qualified.len()),
+        qualified.len(),
+        half_min
+    );
+    if qualified.is_empty() {
+        println!(
+            "⚠  No combinations had at least {} trades in BOTH halves.",
+            half_min
+        );
+        println!("   Either the strategy is too rare-firing, or the candle set is");
+        println!("   too short for a split. Lower --min-trades or widen the window.");
+    } else {
+        // Adaptive param column based on strategy set
+        let show_mr = args.strategy_set == "mean_reversion";
+        let header = if show_mr {
+            "Params (thr|rsi_os|bb_pen|atr_tp|atr_sl|max_adx)"
+        } else {
+            "Params (thr|m_tp|m_sl|ob_thr|ob_tp|ob_sl)"
+        };
+        println!(
+            "{:>3}  {:>6}  {:>6}  {:>6}  {:>6}  {:>6}  {:>6}  {}",
+            "#",
+            "1st_n",
+            "1st_PF",
+            "1st_WR",
+            "2nd_n",
+            "2nd_PF",
+            "2nd_WR",
+            header
+        );
+        for (i, r) in qualified.iter().take(args.top_n).enumerate() {
+            let params_str = if show_mr {
+                format!(
+                    "{:.2}|{:>5.1}|{:>5.2}|{:>4.2}|{:>4.2}|{:>4.1}",
+                    r.first.ensemble_threshold,
+                    r.first.mr_rsi_oversold,
+                    r.first.mr_bb_penetration,
+                    r.first.mr_atr_tp,
+                    r.first.mr_atr_sl,
+                    r.first.mr_max_adx,
+                )
+            } else {
+                format!(
+                    "{:.2}|{:>4.2}|{:>4.2}|{:>4.2}|{:>3}|{:>3}",
+                    r.first.ensemble_threshold,
+                    r.first.momentum_tp_pct,
+                    r.first.momentum_sl_pct,
+                    r.first.ob_imbalance_threshold,
+                    r.first.ob_tp_ticks,
+                    r.first.ob_sl_ticks,
+                )
+            };
+            let pf_fmt = |pf: f64| {
+                if pf.is_finite() && pf < 99.0 {
+                    format!("{:>6.2}", pf)
+                } else if pf.is_finite() {
+                    " 99.00".to_string()
+                } else {
+                    "   inf".to_string()
+                }
+            };
+            println!(
+                "{:>3}  {:>6}  {}  {:>5.1}%  {:>6}  {}  {:>5.1}%  {}",
+                i + 1,
+                r.first.total_trades,
+                pf_fmt(r.first.profit_factor),
+                r.first.win_rate * 100.0,
+                r.second.total_trades,
+                pf_fmt(r.second.profit_factor),
+                r.second.win_rate * 100.0,
+                params_str
+            );
+        }
+    }
+    println!();
+
+    // Walk-forward verdict: look at the best combo's WORST half.
+    let verdict = if let Some(best) = qualified.first() {
+        let worst = best.worst_pf();
+        if worst >= 1.5 {
+            "✓✓ ROBUST EDGE — top combo PF ≥ 1.5 on BOTH halves. Candidate for live."
+        } else if worst >= 1.2 {
+            "✓  PROMISING — top combo holds PF ≥ 1.2 across regimes. Iterate wider."
+        } else if worst >= 0.9 {
+            "○  FRAGILE — top combo breaks on one half. Not yet trustable."
+        } else {
+            "✗  NO ROBUST EDGE — top combo fails one half. Overfit or unlucky."
+        }
+    } else {
+        "✗  INSUFFICIENT DATA — no combo fired in both halves."
+    };
+    println!("Walk-forward verdict: {}", verdict);
+    println!();
+
+    // Save CSV with both halves
+    let report_dir = "data/backtest_reports";
+    std::fs::create_dir_all(report_dir).ok();
+    let csv_path = format!(
+        "{}/wf_{}_{}_{}_{}d.csv",
+        report_dir,
+        venue.as_str(),
+        args.symbol,
+        args.resolution,
+        args.days
+    );
+    if let Ok(mut f) = std::fs::File::create(&csv_path) {
+        let _ = writeln!(
+            f,
+            "ensemble_threshold,momentum_tp_pct,momentum_sl_pct,momentum_vol_mult,\
+ob_imbalance_threshold,ob_tp_ticks,ob_sl_ticks,mr_rsi_oversold,mr_bb_penetration,\
+mr_atr_tp,mr_atr_sl,mr_max_adx,\
+first_trades,first_win_rate,first_profit_factor,first_net_pnl,first_max_dd,first_sharpe,\
+second_trades,second_win_rate,second_profit_factor,second_net_pnl,second_max_dd,second_sharpe,\
+worst_pf"
+        );
+        for r in wf_rows {
+            let _ = writeln!(
+                f,
+                "{},{},{},{},{},{},{},{},{},{},{},{},\
+                 {},{:.4},{:.4},{:.2},{:.2},{:.4},\
+                 {},{:.4},{:.4},{:.2},{:.2},{:.4},\
+                 {:.4}",
+                r.first.ensemble_threshold,
+                r.first.momentum_tp_pct,
+                r.first.momentum_sl_pct,
+                r.first.momentum_vol_mult,
+                r.first.ob_imbalance_threshold,
+                r.first.ob_tp_ticks,
+                r.first.ob_sl_ticks,
+                r.first.mr_rsi_oversold,
+                r.first.mr_bb_penetration,
+                r.first.mr_atr_tp,
+                r.first.mr_atr_sl,
+                r.first.mr_max_adx,
+                r.first.total_trades,
+                r.first.win_rate,
+                r.first.profit_factor,
+                r.first.net_pnl,
+                r.first.max_drawdown_pct,
+                r.first.sharpe,
+                r.second.total_trades,
+                r.second.win_rate,
+                r.second.profit_factor,
+                r.second.net_pnl,
+                r.second.max_drawdown_pct,
+                r.second.sharpe,
+                r.worst_pf(),
+            );
+        }
+        println!("Saved: {}", csv_path);
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -435,24 +675,63 @@ async fn main() -> Result<()> {
     );
     println!();
 
-    // Run the sweep
+    // Decide: single-pass sweep, or walk-forward (first half / second half)?
+    let (candles_a, candles_b_opt): (&[Candle], Option<&[Candle]>) = if args.walk_forward {
+        let mid = candles.len() / 2;
+        println!(
+            "Walk-forward split: first half = {} bars, second half = {} bars",
+            mid,
+            candles.len() - mid
+        );
+        println!();
+        (&candles[..mid], Some(&candles[mid..]))
+    } else {
+        (&candles[..], None)
+    };
+
+    // Run the sweep — for each grid row, evaluate on the training candles.
+    // If walk-forward, also evaluate on the held-out candles and keep both.
     println!("Running sweep...");
     let started = std::time::Instant::now();
 
     let mut rows: Vec<SweepRow> = Vec::with_capacity(grid.len());
+    let mut wf_rows: Vec<WalkForwardRow> = Vec::with_capacity(grid.len());
+
     for (i, params) in grid.iter().enumerate() {
         let mut strategy_cfg = base_strategy_cfg.clone();
         params.apply_to(&mut strategy_cfg);
         let ensemble = build_ensemble(&strategy_cfg, &args.strategy_set);
-        let report = replay_with_costs(
+
+        let report_a = replay_with_costs(
             &args.symbol,
-            &candles,
+            candles_a,
             &ensemble,
             args.notional,
             args.max_hold_bars,
             costs,
         );
-        rows.push(SweepRow::from_report(*params, &report));
+
+        if let Some(candles_b) = candles_b_opt {
+            // Walk-forward: rebuild a fresh ensemble with same params
+            // (build_ensemble takes StrategyConfig by ref, so the same
+            // config yields fresh strategy state on each call — no
+            // cross-contamination between halves).
+            let ensemble_b = build_ensemble(&strategy_cfg, &args.strategy_set);
+            let report_b = replay_with_costs(
+                &args.symbol,
+                candles_b,
+                &ensemble_b,
+                args.notional,
+                args.max_hold_bars,
+                costs,
+            );
+            wf_rows.push(WalkForwardRow {
+                first: SweepRow::from_report(*params, &report_a),
+                second: SweepRow::from_report(*params, &report_b),
+            });
+        } else {
+            rows.push(SweepRow::from_report(*params, &report_a));
+        }
 
         // Progress heartbeat every 10%
         let total = grid.len().max(1);
@@ -465,6 +744,13 @@ async fn main() -> Result<()> {
     let elapsed = started.elapsed();
     println!("Sweep complete in {:.2}s", elapsed.as_secs_f64());
     println!();
+
+    // If walk-forward mode: collapse WalkForwardRows into a rank-by-worst
+    // order and short-circuit the rest of the display pipeline.
+    if !wf_rows.is_empty() {
+        display_walk_forward(&wf_rows, &args, venue);
+        return Ok(());
+    }
 
     // Filter + rank
     let mut qualified: Vec<SweepRow> = rows
@@ -572,6 +858,58 @@ async fn main() -> Result<()> {
                 row.net_pnl,
                 row.max_drawdown_pct,
                 row.sharpe,
+                params_str
+            );
+        }
+    }
+    println!();
+
+    // Best-of-bucket: for each trade-count bucket, show the top combo.
+    // This surfaces larger-sample winners that the global top-N hides
+    // because small-sample combos always have higher PF by chance.
+    println!("Best combo in each trade-count bucket (sample-size aware):");
+    println!(
+        "  {:<14}  {:>6}  {:>6}  {:>6}  {:>9}  {}",
+        "Bucket", "Trades", "Win%", "PF", "Net$", "Params"
+    );
+    for (lo, hi, label) in buckets {
+        if lo == 0 {
+            continue;
+        }
+        let best = rows
+            .iter()
+            .filter(|r| r.total_trades >= lo && r.total_trades <= hi)
+            .filter(|r| r.profit_factor.is_finite() && r.profit_factor < 99.0)
+            .max_by(|a, b| a.profit_factor.partial_cmp(&b.profit_factor).unwrap_or(std::cmp::Ordering::Equal));
+        if let Some(row) = best {
+            let params_str = if show_mr_params {
+                format!(
+                    "thr={:.2} rsi_os={:.0} bb_pen={:.2} atr_tp={:.2} atr_sl={:.2} adx_max={:.0}",
+                    row.ensemble_threshold,
+                    row.mr_rsi_oversold,
+                    row.mr_bb_penetration,
+                    row.mr_atr_tp,
+                    row.mr_atr_sl,
+                    row.mr_max_adx,
+                )
+            } else {
+                format!(
+                    "thr={:.2} m_tp={:.2} m_sl={:.2} ob_thr={:.2} ob_tp={} ob_sl={}",
+                    row.ensemble_threshold,
+                    row.momentum_tp_pct,
+                    row.momentum_sl_pct,
+                    row.ob_imbalance_threshold,
+                    row.ob_tp_ticks,
+                    row.ob_sl_ticks,
+                )
+            };
+            println!(
+                "  {:<14}  {:>6}  {:>5.1}%  {:>6.2}  {:>9.2}  {}",
+                label,
+                row.total_trades,
+                row.win_rate * 100.0,
+                row.profit_factor,
+                row.net_pnl,
                 params_str
             );
         }
