@@ -742,6 +742,13 @@ fn build_strategies(config: &ScalperConfig) -> Vec<Box<dyn Strategy>> {
             config.strategy.funding_bias.clone(),
         )));
     }
+    if config.strategy.mean_reversion.enabled {
+        strategies.push(Box::new(
+            scalper_strategy::mean_reversion::MeanReversionStrategy::new(
+                config.strategy.mean_reversion.clone(),
+            ),
+        ));
+    }
 
     info!("Loaded {} strategies", strategies.len());
     strategies

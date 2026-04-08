@@ -15,12 +15,13 @@
 //! subsequent runs on the same symbol/resolution are instant.
 
 use anyhow::{Context, Result};
-use scalper_backtest::historical::load_candles;
-use scalper_backtest::replay::replay;
+use scalper_backtest::historical::{load_candles_ex, Venue};
+use scalper_backtest::replay::{replay_with_costs, CostModel};
 use scalper_core::config::ScalperConfig;
 use scalper_strategy::ensemble::EnsembleStrategy;
 use scalper_strategy::funding_arb::FundingBiasStrategy;
 use scalper_strategy::liquidation_wick::LiquidationWickStrategy;
+use scalper_strategy::mean_reversion::MeanReversionStrategy;
 use scalper_strategy::momentum::MomentumStrategy;
 use scalper_strategy::ob_imbalance::ObImbalanceStrategy;
 use scalper_strategy::traits::Strategy;
@@ -34,6 +35,7 @@ struct Args {
     max_hold_bars: usize,
     mode: String,
     from_file: Option<String>,
+    venue: String,
 }
 
 impl Args {
@@ -45,6 +47,7 @@ impl Args {
         let mut max_hold_bars: usize = 10;
         let mut mode = "paper".to_string();
         let mut from_file: Option<String> = None;
+        let mut venue = "kraken".to_string();
 
         let args: Vec<String> = std::env::args().skip(1).collect();
         let mut i = 0;
@@ -99,6 +102,13 @@ impl Args {
                         continue;
                     }
                 }
+                "--venue" | "-v" => {
+                    if let Some(v) = args.get(i + 1) {
+                        venue = v.clone();
+                        i += 2;
+                        continue;
+                    }
+                }
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -117,6 +127,7 @@ impl Args {
             max_hold_bars,
             mode,
             from_file,
+            venue,
         }
     }
 }
@@ -129,23 +140,29 @@ USAGE:
   cargo run --release --bin backtest -- [OPTIONS]
 
 OPTIONS:
-  -s, --symbol <SYM>       Kraken futures symbol (default: PI_XBTUSD)
-  -r, --resolution <RES>   1m, 5m, 15m, 1h, 4h, 1d (default: 1m)
+  -s, --symbol <SYM>       Symbol to backtest.
+                             Kraken: PI_XBTUSD, PI_ETHUSD (default)
+                             Binance: BTCUSDT, ETHUSDT
+  -r, --resolution <RES>   1m, 5m, 15m, 30m, 1h, 4h, 1d (default: 1m)
   -d, --days <N>           How many days of history to load (default: 30)
   -n, --notional <USD>     Dollar size per simulated trade (default: 5000)
       --max-hold <BARS>    Force-exit after N bars if still open (default: 10)
   -m, --mode <MODE>        Config mode to load (default: paper)
+  -v, --venue <V>          Data source: kraken | binance (default: kraken)
       --from-file <PATH>   Load candles from a local JSON file instead of
-                           fetching from Kraken (same format as the cache
-                           files under data/history/)
+                           fetching from the venue (same format as the
+                           cache files under data/history/)
   -h, --help               Show this help
 
 EXAMPLES:
-  # Default: 30 days of 1m PI_XBTUSD
+  # Default: 30 days of 1m PI_XBTUSD on Kraken
   cargo run --release --bin backtest
 
-  # 7 days of 5m PI_ETHUSD with larger positions
-  cargo run --release --bin backtest -- -s PI_ETHUSD -r 5m -d 7 -n 10000
+  # 30 days of 5m on Binance (better fee profile — 2 bps vs 5 bps)
+  cargo run --release --bin backtest -- -v binance -s BTCUSDT -r 5m -d 30
+
+  # 7 days of 15m PI_ETHUSD with larger positions
+  cargo run --release --bin backtest -- -s PI_ETHUSD -r 15m -d 7 -n 10000
 "#
     );
 }
@@ -164,6 +181,9 @@ fn build_strategies(config: &ScalperConfig) -> Vec<Box<dyn Strategy>> {
     if config.strategy.funding_bias.enabled {
         strategies.push(Box::new(FundingBiasStrategy::new(config.strategy.funding_bias.clone())));
     }
+    if config.strategy.mean_reversion.enabled {
+        strategies.push(Box::new(MeanReversionStrategy::new(config.strategy.mean_reversion.clone())));
+    }
     strategies
 }
 
@@ -177,10 +197,12 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    let venue = Venue::parse(&args.venue).context("parse --venue")?;
     println!("╔══════════════════════════════════════════════════════════════════╗");
     println!("║             CRYPTO SCALPER — OFFLINE BACKTEST HARNESS           ║");
     println!("╚══════════════════════════════════════════════════════════════════╝");
     println!();
+    println!("Venue:       {}", venue.as_str());
     println!("Symbol:      {}", args.symbol);
     println!("Resolution:  {}", args.resolution);
     println!("Window:      {} days", args.days);
@@ -211,7 +233,7 @@ async fn main() -> Result<()> {
     }
     let ensemble = EnsembleStrategy::new(strategies, config.strategy.ensemble_threshold);
 
-    // 3. Load candles (from file, cache, or Kraken)
+    // 3. Load candles (from file, cache, or the venue)
     let candles = if let Some(ref path) = args.from_file {
         println!("Loading candles from {}", path);
         let bytes = std::fs::read(path)
@@ -220,7 +242,7 @@ async fn main() -> Result<()> {
             .with_context(|| format!("parse {}", path))?;
         candles
     } else {
-        load_candles(&args.symbol, &args.resolution, args.days).await?
+        load_candles_ex(venue, &args.symbol, &args.resolution, args.days).await?
     };
     if candles.len() < 60 {
         anyhow::bail!(
@@ -239,15 +261,25 @@ async fn main() -> Result<()> {
     println!("Loaded {} candles — {} to {}", candles.len(), start_s, end_s);
     println!();
 
-    // 4. Run the replay
+    // 4. Run the replay with venue-specific cost model
+    let costs = match venue {
+        Venue::Kraken => CostModel::KRAKEN,
+        Venue::Binance => CostModel::BINANCE,
+    };
+    println!(
+        "Cost model:  {:.1} bps fee + {:.1} bps slippage per leg",
+        costs.fee_bps, costs.slippage_bps
+    );
+    println!();
     println!("Replaying...");
     let started = std::time::Instant::now();
-    let report = replay(
+    let report = replay_with_costs(
         &args.symbol,
         &candles,
         &ensemble,
         args.notional,
         args.max_hold_bars,
+        costs,
     );
     let elapsed = started.elapsed();
     println!("Replay complete in {:.2}s", elapsed.as_secs_f64());
@@ -278,11 +310,16 @@ async fn main() -> Result<()> {
     let report_dir = "data/backtest_reports";
     std::fs::create_dir_all(report_dir).ok();
     let filename = format!(
-        "{}/{}_{}_{}d.json",
-        report_dir, args.symbol, args.resolution, args.days
+        "{}/{}_{}_{}_{}d.json",
+        report_dir,
+        venue.as_str(),
+        args.symbol,
+        args.resolution,
+        args.days
     );
     #[derive(serde::Serialize)]
     struct JsonReport {
+        venue: String,
         symbol: String,
         resolution: String,
         days: u32,
@@ -308,6 +345,7 @@ async fn main() -> Result<()> {
         timestamp: String,
     }
     let j = JsonReport {
+        venue: venue.as_str().to_string(),
         symbol: args.symbol.clone(),
         resolution: args.resolution.clone(),
         days: args.days,

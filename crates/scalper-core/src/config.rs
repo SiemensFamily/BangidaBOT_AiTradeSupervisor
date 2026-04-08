@@ -71,6 +71,21 @@ pub struct StrategyConfig {
     pub ob_imbalance: ObImbalanceConfig,
     pub liquidation_wick: LiquidationWickConfig,
     pub funding_bias: FundingBiasConfig,
+    #[serde(default = "default_mean_reversion_config")]
+    pub mean_reversion: MeanReversionConfig,
+}
+
+fn default_mean_reversion_config() -> MeanReversionConfig {
+    MeanReversionConfig {
+        enabled: false,
+        weight: 0.20,
+        rsi_oversold: 30.0,
+        rsi_overbought: 70.0,
+        bb_penetration: 0.05,
+        atr_tp_multiplier: 1.5,
+        atr_sl_multiplier: 1.0,
+        max_adx: 25.0,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +125,26 @@ pub struct FundingBiasConfig {
     pub weight: f64,
     pub funding_threshold: f64,
     pub strength_boost: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeanReversionConfig {
+    pub enabled: bool,
+    pub weight: f64,
+    /// RSI threshold below which we consider the market oversold (long entries).
+    pub rsi_oversold: f64,
+    /// RSI threshold above which we consider the market overbought (short entries).
+    pub rsi_overbought: f64,
+    /// How far outside the Bollinger band the price must poke, measured
+    /// as a fraction of the band-width. 0.05 = 5% of the band-width.
+    pub bb_penetration: f64,
+    /// Take-profit distance in ATR multiples from entry.
+    pub atr_tp_multiplier: f64,
+    /// Stop-loss distance in ATR multiples from entry.
+    pub atr_sl_multiplier: f64,
+    /// Skip entries when ADX is above this value (i.e., market is trending).
+    /// Mean reversion works best in ranging markets.
+    pub max_adx: f64,
 }
 
 impl ScalperConfig {

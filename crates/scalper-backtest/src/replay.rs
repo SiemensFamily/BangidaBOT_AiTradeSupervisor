@@ -37,11 +37,39 @@ use crate::historical::Candle;
 use crate::report::{BacktestReport, ReportBuilder};
 
 /// Fees per leg, in basis points (Kraken taker is 5 bps).
-pub const FEE_BPS: f64 = 5.0;
-/// Slippage per leg, in basis points.
+pub const FEE_BPS_KRAKEN: f64 = 5.0;
+/// Fees per leg, in basis points (Binance Futures taker is ~4 bps for
+/// regular users, 2 bps with VIP 0 + BNB discount).
+pub const FEE_BPS_BINANCE: f64 = 4.0;
+/// Default slippage per leg, in basis points.
 pub const SLIPPAGE_BPS: f64 = 2.0;
 /// Maximum bars to hold a position before forcing an exit.
 pub const DEFAULT_MAX_HOLD_BARS: usize = 10;
+
+/// Cost model for simulated fills. Fees + slippage are each applied once
+/// per leg (entry AND exit), so round-trip cost is `2 * (fee + slippage)`.
+#[derive(Debug, Clone, Copy)]
+pub struct CostModel {
+    pub fee_bps: f64,
+    pub slippage_bps: f64,
+}
+
+impl CostModel {
+    pub const KRAKEN: Self = Self {
+        fee_bps: FEE_BPS_KRAKEN,
+        slippage_bps: SLIPPAGE_BPS,
+    };
+    pub const BINANCE: Self = Self {
+        fee_bps: FEE_BPS_BINANCE,
+        slippage_bps: SLIPPAGE_BPS,
+    };
+}
+
+impl Default for CostModel {
+    fn default() -> Self {
+        Self::KRAKEN
+    }
+}
 
 struct OpenPosition {
     side: Side,
@@ -285,6 +313,8 @@ fn synth_ctx(
 /// we aren't using the live risk manager's equity curve because that would
 /// make drawdown a function of starting balance rather than a pure
 /// strategy metric).
+///
+/// Backwards-compatible wrapper that uses the Kraken cost model.
 pub fn replay(
     symbol: &str,
     candles: &[Candle],
@@ -292,13 +322,32 @@ pub fn replay(
     notional: f64,
     max_hold_bars: usize,
 ) -> BacktestReport {
+    replay_with_costs(
+        symbol,
+        candles,
+        ensemble,
+        notional,
+        max_hold_bars,
+        CostModel::default(),
+    )
+}
+
+/// Full version: lets the caller specify a cost model (fees + slippage).
+pub fn replay_with_costs(
+    symbol: &str,
+    candles: &[Candle],
+    ensemble: &EnsembleStrategy,
+    notional: f64,
+    max_hold_bars: usize,
+    costs: CostModel,
+) -> BacktestReport {
     let mut ind = IndicatorStack::new();
     let mut window = HighLowWindow::new(60);
     let mut report = ReportBuilder::new(notional);
     let mut open: Option<OpenPosition> = None;
 
-    let fee_rate = FEE_BPS / 10_000.0;
-    let slip = SLIPPAGE_BPS / 10_000.0;
+    let fee_rate = costs.fee_bps / 10_000.0;
+    let slip = costs.slippage_bps / 10_000.0;
 
     for (i, c) in candles.iter().enumerate() {
         ind.update(c);
