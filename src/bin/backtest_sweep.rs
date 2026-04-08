@@ -50,7 +50,7 @@ impl Args {
         let mut max_hold_bars: usize = 10;
         let mut mode = "paper".to_string();
         let mut venue = "kraken".to_string();
-        let mut min_trades: u64 = 10;
+        let mut min_trades: u64 = 5;
         let mut top_n: usize = 10;
         let mut strategy_set = "momentum_ob".to_string();
         let mut from_file: Option<String> = None;
@@ -119,7 +119,7 @@ OPTIONS:
       --max-hold <BARS>    Max bars to hold (default: 10)
   -m, --mode <MODE>        Config mode (default: paper)
   -v, --venue <V>          kraken | binance (default: kraken)
-      --min-trades <N>     Skip combos with fewer trades than this (default: 10)
+      --min-trades <N>     Skip combos with fewer trades than this (default: 5)
       --top <N>            Show top-N combos (default: 10)
       --strategies <SET>   momentum_ob | mean_reversion | all (default: momentum_ob)
       --from-file <PATH>   Load candles from a local JSON file instead of
@@ -474,6 +474,47 @@ async fn main() -> Result<()> {
         .collect();
     qualified.sort_by(|a, b| b.profit_factor.partial_cmp(&a.profit_factor).unwrap_or(std::cmp::Ordering::Equal));
 
+    // Trade-count distribution across all combos (not just qualified) —
+    // helps identify whether the strategy is firing at all and how its
+    // rate changes with the param grid.
+    println!("Trade count distribution across all {} combos:", rows.len());
+    let buckets = [
+        (0, 0, "0 trades (dead)"),
+        (1, 4, "1-4 trades"),
+        (5, 9, "5-9 trades"),
+        (10, 19, "10-19 trades"),
+        (20, 49, "20-49 trades"),
+        (50, 99, "50-99 trades"),
+        (100, u64::MAX, "100+ trades"),
+    ];
+    for (lo, hi, label) in buckets {
+        let count = rows.iter().filter(|r| r.total_trades >= lo && r.total_trades <= hi).count();
+        if count > 0 {
+            // Best PF within this bucket (only for combos that had trades)
+            let best_in_bucket = rows
+                .iter()
+                .filter(|r| r.total_trades >= lo && r.total_trades <= hi && lo > 0)
+                .map(|r| r.profit_factor)
+                .fold(f64::NEG_INFINITY, f64::max);
+            if lo > 0 && best_in_bucket.is_finite() {
+                println!(
+                    "  {:<20} {:>6} combos    best PF: {:.2}",
+                    label, count, best_in_bucket
+                );
+            } else {
+                println!("  {:<20} {:>6} combos", label, count);
+            }
+        }
+    }
+    println!();
+
+    // Choose which param columns to show based on the strategy set
+    let (params_header, show_mr_params) = match args.strategy_set.as_str() {
+        "mean_reversion" => ("Params (thr|rsi_os|bb_pen|atr_tp|atr_sl|max_adx)", true),
+        "all" => ("Params (thr|m_tp|m_sl|ob_thr|ob_tp|rsi_os|atr_tp)", false), // will still show momentum_ob for "all"
+        _ => ("Params (thr|m_tp|m_sl|ob_thr|ob_tp_ticks|ob_sl_ticks)", false),
+    };
+
     println!(
         "──────────────────────── TOP {} (of {} qualified, min {} trades) ────────────────────────",
         args.top_n.min(qualified.len()),
@@ -482,17 +523,48 @@ async fn main() -> Result<()> {
     );
     if qualified.is_empty() {
         println!("⚠  No combinations produced at least {} trades.", args.min_trades);
-        println!("   The strategies are not firing — try lowering thresholds or");
-        println!("   widening the grid, or check whether the indicator stack has");
-        println!("   enough history to warm up.");
+        println!("   Lower --min-trades, widen the grid, or check whether the");
+        println!("   indicator stack has enough history to warm up.");
     } else {
         println!(
-            "{:>4}  {:>7}  {:>6}  {:>6}  {:>8}  {:>8}  {:>6}  {:>30}",
-            "#", "Trades", "Win%", "PF", "Net$", "DD%", "Sharpe", "Params (thr|m_tp|m_sl|ob_t|ob_tp)"
+            "{:>4}  {:>7}  {:>6}  {:>6}  {:>9}  {:>7}  {:>7}  {}",
+            "#", "Trades", "Win%", "PF", "Net$", "DD%", "Sharpe", params_header
         );
         for (i, row) in qualified.iter().take(args.top_n).enumerate() {
+            let params_str = if show_mr_params {
+                format!(
+                    "{:.2}|{:>5.1}|{:>5.2}|{:>4.2}|{:>4.2}|{:>4.1}",
+                    row.ensemble_threshold,
+                    row.mr_rsi_oversold,
+                    row.mr_bb_penetration,
+                    row.mr_atr_tp,
+                    row.mr_atr_sl,
+                    row.mr_max_adx,
+                )
+            } else if args.strategy_set == "all" {
+                format!(
+                    "{:.2}|{:>4.2}|{:>4.2}|{:>4.2}|{:>3}|{:>4.1}|{:>4.2}",
+                    row.ensemble_threshold,
+                    row.momentum_tp_pct,
+                    row.momentum_sl_pct,
+                    row.ob_imbalance_threshold,
+                    row.ob_tp_ticks,
+                    row.mr_rsi_oversold,
+                    row.mr_atr_tp,
+                )
+            } else {
+                format!(
+                    "{:.2}|{:>4.2}|{:>4.2}|{:>4.2}|{:>3}|{:>3}",
+                    row.ensemble_threshold,
+                    row.momentum_tp_pct,
+                    row.momentum_sl_pct,
+                    row.ob_imbalance_threshold,
+                    row.ob_tp_ticks,
+                    row.ob_sl_ticks,
+                )
+            };
             println!(
-                "{:>4}  {:>7}  {:>5.1}%  {:>6.2}  {:>8.2}  {:>7.1}%  {:>6.2}  {:>30}",
+                "{:>4}  {:>7}  {:>5.1}%  {:>6.2}  {:>9.2}  {:>6.1}%  {:>7.2}  {}",
                 i + 1,
                 row.total_trades,
                 row.win_rate * 100.0,
@@ -500,14 +572,7 @@ async fn main() -> Result<()> {
                 row.net_pnl,
                 row.max_drawdown_pct,
                 row.sharpe,
-                format!(
-                    "{:.2}|{:.2}|{:.2}|{:.2}|{}",
-                    row.ensemble_threshold,
-                    row.momentum_tp_pct,
-                    row.momentum_sl_pct,
-                    row.ob_imbalance_threshold,
-                    row.ob_tp_ticks
-                )
+                params_str
             );
         }
     }

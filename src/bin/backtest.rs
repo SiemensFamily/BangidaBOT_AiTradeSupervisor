@@ -36,6 +36,7 @@ struct Args {
     mode: String,
     from_file: Option<String>,
     venue: String,
+    split: bool,
 }
 
 impl Args {
@@ -48,6 +49,7 @@ impl Args {
         let mut mode = "paper".to_string();
         let mut from_file: Option<String> = None;
         let mut venue = "kraken".to_string();
+        let mut split = false;
 
         let args: Vec<String> = std::env::args().skip(1).collect();
         let mut i = 0;
@@ -109,6 +111,11 @@ impl Args {
                         continue;
                     }
                 }
+                "--split" => {
+                    split = true;
+                    i += 1;
+                    continue;
+                }
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -128,6 +135,7 @@ impl Args {
             mode,
             from_file,
             venue,
+            split,
         }
     }
 }
@@ -152,6 +160,10 @@ OPTIONS:
       --from-file <PATH>   Load candles from a local JSON file instead of
                            fetching from the venue (same format as the
                            cache files under data/history/)
+      --split              Run three reports: first half, second half, full.
+                           Used for walk-forward validation — if the first
+                           half shows strong edge but the second half shows
+                           none, the edge is regime-specific luck.
   -h, --help               Show this help
 
 EXAMPLES:
@@ -271,24 +283,104 @@ async fn main() -> Result<()> {
         costs.fee_bps, costs.slippage_bps
     );
     println!();
-    println!("Replaying...");
+
     let started = std::time::Instant::now();
-    let report = replay_with_costs(
-        &args.symbol,
-        &candles,
-        &ensemble,
-        args.notional,
-        args.max_hold_bars,
-        costs,
-    );
+    let report = if args.split {
+        // Walk-forward: run on the first half, the second half, and the
+        // full dataset. Print each so the user can see if the edge holds
+        // across regimes. The returned `report` is the full-dataset one,
+        // used for the verdict + JSON output below.
+        let mid = candles.len() / 2;
+        let first_half = &candles[..mid];
+        let second_half = &candles[mid..];
+
+        let r_first = replay_with_costs(
+            &args.symbol,
+            first_half,
+            &ensemble,
+            args.notional,
+            args.max_hold_bars,
+            costs,
+        );
+        let r_second = replay_with_costs(
+            &args.symbol,
+            second_half,
+            &ensemble,
+            args.notional,
+            args.max_hold_bars,
+            costs,
+        );
+        let r_full = replay_with_costs(
+            &args.symbol,
+            &candles,
+            &ensemble,
+            args.notional,
+            args.max_hold_bars,
+            costs,
+        );
+
+        let first_start = first_half.first().map(|c| c.time_ms).unwrap_or(0);
+        let first_end = first_half.last().map(|c| c.time_ms).unwrap_or(0);
+        let second_start = second_half.first().map(|c| c.time_ms).unwrap_or(0);
+        let second_end = second_half.last().map(|c| c.time_ms).unwrap_or(0);
+        let fmt_ts = |ms: u64| {
+            chrono::DateTime::from_timestamp_millis(ms as i64)
+                .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "?".to_string())
+        };
+
+        println!(
+            "─────────── FIRST HALF ({} → {}, {} bars) ───────────",
+            fmt_ts(first_start),
+            fmt_ts(first_end),
+            first_half.len()
+        );
+        print!("{}", r_first);
+        println!();
+        println!(
+            "─────────── SECOND HALF ({} → {}, {} bars) ───────────",
+            fmt_ts(second_start),
+            fmt_ts(second_end),
+            second_half.len()
+        );
+        print!("{}", r_second);
+        println!();
+        println!("─────────── FULL DATASET ({} bars) ───────────", candles.len());
+        print!("{}", r_full);
+        println!();
+
+        // Walk-forward verdict: both halves need edge, not just one.
+        let first_ok = r_first.profit_factor >= 1.2 && r_first.total_trades >= 5;
+        let second_ok = r_second.profit_factor >= 1.2 && r_second.total_trades >= 5;
+        let walk_forward = match (first_ok, second_ok) {
+            (true, true) => "✓  EDGE HOLDS ACROSS BOTH HALVES — plausibly real.",
+            (true, false) => "✗  EDGE ONLY ON FIRST HALF — regime-specific luck, do not trust.",
+            (false, true) => "○  EDGE ONLY ON SECOND HALF — possibly a recent regime shift.",
+            (false, false) => "✗  NO EDGE ON EITHER HALF.",
+        };
+        println!("Walk-forward verdict: {}", walk_forward);
+        println!();
+
+        r_full
+    } else {
+        println!("Replaying...");
+        let r = replay_with_costs(
+            &args.symbol,
+            &candles,
+            &ensemble,
+            args.notional,
+            args.max_hold_bars,
+            costs,
+        );
+        println!();
+        println!("──────────────────────── RESULTS ────────────────────────");
+        print!("{}", r);
+        println!("─────────────────────────────────────────────────────────");
+        println!();
+        r
+    };
     let elapsed = started.elapsed();
     println!("Replay complete in {:.2}s", elapsed.as_secs_f64());
-    println!();
-
-    // 5. Print report
-    println!("──────────────────────── RESULTS ────────────────────────");
-    print!("{}", report);
-    println!("─────────────────────────────────────────────────────────");
     println!();
 
     // 6. Verdict — honest assessment
