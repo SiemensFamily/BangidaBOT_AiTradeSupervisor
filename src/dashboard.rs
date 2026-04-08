@@ -22,6 +22,7 @@ use scalper_risk::risk_manager::RiskManager;
 
 use crate::IndicatorState;
 use crate::auto_tuner::AutoTunerState;
+use crate::learning::LearningState;
 use scalper_strategy::StrategyVote;
 
 // ── Trade history ──────────────────────────────────────────────────────────
@@ -106,6 +107,7 @@ pub struct DashboardState {
     pub connected_exchanges: Arc<Mutex<HashSet<String>>>,
     pub strategy_votes: Arc<Mutex<Vec<StrategyVote>>>,
     pub auto_tuner_state: Arc<Mutex<AutoTunerState>>,
+    pub learning_state: Arc<Mutex<LearningState>>,
     pub ws_tx: broadcast::Sender<String>,
 }
 
@@ -155,6 +157,8 @@ struct Snapshot {
     strategy_status: Vec<StrategyStatusSnap>,
     // Auto-tuner status
     auto_tuner: AutoTunerSnap,
+    // Learning mode status
+    learning: LearningSnap,
 }
 
 #[derive(Serialize)]
@@ -164,6 +168,31 @@ struct AutoTunerSnap {
     total_changes: u64,
     last_summary: String,
     last_changes: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct LearningSnap {
+    enabled: bool,
+    generation: u64,
+    population_size: usize,
+    total_ticks: u64,
+    last_evolve_ms: u64,
+    best_fitness: f64,
+    avg_fitness: f64,
+    best_pnl: f64,
+    top_candidates: Vec<LearningCandidateSnap>,
+}
+
+#[derive(Serialize)]
+struct LearningCandidateSnap {
+    id: u32,
+    fitness: f64,
+    net_pnl: f64,
+    wins: u32,
+    losses: u32,
+    win_rate: f64,
+    profit_factor: f64,
+    genome: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -238,6 +267,9 @@ pub async fn start_dashboard(state: DashboardState) {
         .route("/api/console.csv", get(get_console_csv))
         .route("/api/auto_tuner_log", get(get_auto_tuner_log))
         .route("/api/circuit_breaker", axum::routing::post(set_circuit_breaker))
+        .route("/api/learning", get(get_learning))
+        .route("/api/learning/enabled", axum::routing::post(set_learning_enabled))
+        .route("/api/learning/history", get(get_learning_history))
         .route("/api/debug", get(get_debug))
         .with_state(state);
 
@@ -396,6 +428,80 @@ async fn get_auto_tuner_log() -> Json<AutoTunerLogResponse> {
     Json(AutoTunerLogResponse { lines })
 }
 
+// ── REST: Learning mode ───────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct LearningStateResponse {
+    enabled: bool,
+    generation: u64,
+    population_size: usize,
+    total_ticks: u64,
+    last_evolve_ms: u64,
+    best_fitness: f64,
+    avg_fitness: f64,
+    best_pnl: f64,
+    candidates: Vec<LearningCandidateSnap>,
+}
+
+async fn get_learning(State(state): State<DashboardState>) -> Json<LearningStateResponse> {
+    let ls = state.learning_state.lock().await;
+    let mut sorted: Vec<&scalper_learning::Candidate> = ls.population.candidates.iter().collect();
+    sorted.sort_by(|a, b| b.fitness().partial_cmp(&a.fitness()).unwrap_or(std::cmp::Ordering::Equal));
+    let candidates = sorted
+        .iter()
+        .map(|c| LearningCandidateSnap {
+            id: c.id,
+            fitness: c.fitness(),
+            net_pnl: c.net_pnl,
+            wins: c.wins,
+            losses: c.losses,
+            win_rate: c.win_rate(),
+            profit_factor: c.profit_factor(),
+            genome: serde_json::to_value(&c.genome).unwrap_or(serde_json::Value::Null),
+        })
+        .collect();
+    Json(LearningStateResponse {
+        enabled: ls.enabled,
+        generation: ls.population.generation,
+        population_size: ls.population.candidates.len(),
+        total_ticks: ls.total_ticks,
+        last_evolve_ms: ls.last_evolve_ms,
+        best_fitness: ls.population.best().map(|c| c.fitness()).unwrap_or(0.0),
+        avg_fitness: ls.population.avg_fitness(),
+        best_pnl: ls.population.best().map(|c| c.net_pnl).unwrap_or(0.0),
+        candidates,
+    })
+}
+
+#[derive(Deserialize)]
+struct LearningEnableReq {
+    enabled: bool,
+}
+
+async fn set_learning_enabled(
+    State(state): State<DashboardState>,
+    Json(req): Json<LearningEnableReq>,
+) -> impl IntoResponse {
+    state.learning_state.lock().await.enabled = req.enabled;
+    let msg = format!("Learning mode {}", if req.enabled { "enabled" } else { "disabled" });
+    state.console_log.lock().await.push(msg.clone());
+    (axum::http::StatusCode::OK, msg)
+}
+
+#[derive(Serialize)]
+struct LearningHistoryResponse {
+    points: Vec<(i64, f64)>,
+}
+
+async fn get_learning_history() -> Json<LearningHistoryResponse> {
+    // Open the DB read-only on demand. Returns empty if the file doesn't exist.
+    let points = match scalper_learning::database::LearningDb::open(crate::learning::DB_PATH) {
+        Ok(db) => db.fitness_history(200).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    Json(LearningHistoryResponse { points })
+}
+
 // ── REST: Debug ───────────────────────────────────────────────────────────
 
 async fn get_debug(State(state): State<DashboardState>) -> Json<Snapshot> {
@@ -530,6 +636,37 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
     };
     drop(at);
 
+    // Learning state
+    let ls = state.learning_state.lock().await;
+    let mut sorted: Vec<&scalper_learning::Candidate> = ls.population.candidates.iter().collect();
+    sorted.sort_by(|a, b| b.fitness().partial_cmp(&a.fitness()).unwrap_or(std::cmp::Ordering::Equal));
+    let top_candidates: Vec<LearningCandidateSnap> = sorted
+        .iter()
+        .take(5)
+        .map(|c| LearningCandidateSnap {
+            id: c.id,
+            fitness: c.fitness(),
+            net_pnl: c.net_pnl,
+            wins: c.wins,
+            losses: c.losses,
+            win_rate: c.win_rate(),
+            profit_factor: c.profit_factor(),
+            genome: serde_json::to_value(&c.genome).unwrap_or(serde_json::Value::Null),
+        })
+        .collect();
+    let learning = LearningSnap {
+        enabled: ls.enabled,
+        generation: ls.population.generation,
+        population_size: ls.population.candidates.len(),
+        total_ticks: ls.total_ticks,
+        last_evolve_ms: ls.last_evolve_ms,
+        best_fitness: ls.population.best().map(|c| c.fitness()).unwrap_or(0.0),
+        avg_fitness: ls.population.avg_fitness(),
+        best_pnl: ls.population.best().map(|c| c.net_pnl).unwrap_or(0.0),
+        top_candidates,
+    };
+    drop(ls);
+
     Snapshot {
         timestamp_ms: now_ms,
         mode: state.config_mode.clone(),
@@ -564,5 +701,6 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
         exchange_status,
         strategy_status,
         auto_tuner,
+        learning,
     }
 }

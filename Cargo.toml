@@ -8,6 +8,7 @@ members = [
     "crates/scalper-risk",
     "crates/scalper-execution",
     "crates/scalper-backtest",
+    "crates/scalper-learning",
     "crates/scalper-desktop",
 ]
 
@@ -29,8 +30,10 @@ scalper-strategy = { path = "crates/scalper-strategy" }
 scalper-risk = { path = "crates/scalper-risk" }
 scalper-execution = { path = "crates/scalper-execution" }
 scalper-backtest = { path = "crates/scalper-backtest" }
+scalper-learning = { path = "crates/scalper-learning" }
 
 tokio = { version = "1", features = ["full"] }
+rand = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"

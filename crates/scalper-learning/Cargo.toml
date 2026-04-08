@@ -1,0 +1,13 @@
+[package]
+name = "scalper-learning"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+rand = "0.8"

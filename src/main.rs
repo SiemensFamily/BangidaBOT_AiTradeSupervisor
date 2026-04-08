@@ -28,6 +28,7 @@ use tracing::{error, info, warn};
 mod dashboard;
 mod paper_sim;
 mod auto_tuner;
+mod learning;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -116,6 +117,8 @@ async fn main() -> Result<()> {
         Arc::new(Mutex::new(Vec::new()));
     let strategy_votes: Arc<Mutex<Vec<StrategyVote>>> =
         Arc::new(Mutex::new(Vec::new()));
+    let learning_state: Arc<Mutex<learning::LearningState>> =
+        Arc::new(Mutex::new(learning::LearningState::new()));
     let last_funding_rate: Arc<Mutex<f64>> = Arc::new(Mutex::new(0.0));
     let price_history: Arc<Mutex<HashMap<String, VecDeque<(u64, f64)>>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -183,6 +186,7 @@ async fn main() -> Result<()> {
         let price_history = price_history.clone();
         let signal_log = signal_log.clone();
         let console_log = console_log.clone();
+        let learning_state = learning_state.clone();
         // Build map of config symbol → all possible orderbook keys (including mapped names)
         let mut symbol_lookup: HashMap<String, Vec<String>> = HashMap::new();
         for s in &symbols {
@@ -231,6 +235,22 @@ async fn main() -> Result<()> {
                     }
 
                     if let Some(ctx) = ctx_opt {
+                        // Feed the learning system a snapshot every tick. The
+                        // population shadow-evaluates each candidate against
+                        // the same data the live strategy engine sees.
+                        {
+                            let snap = scalper_learning::MarketSnapshot {
+                                timestamp_ms: ctx.timestamp_ms,
+                                mid_price: decimal_to_f64(ctx.last_price),
+                                spread: decimal_to_f64(ctx.spread),
+                                imbalance_ratio: ctx.imbalance_ratio,
+                                rsi_14: ctx.rsi_14,
+                                adx_14: ctx.adx_14,
+                                supertrend_up: ctx.supertrend_up,
+                            };
+                            learning_state.lock().await.tick(&snap);
+                        }
+
                         // Periodic diagnostic dump every 30s (300 ticks at 100ms)
                         // to the console/terminal tab — kept out of the Analyst
                         // Log so signal rows aren't polluted by debug entries.
@@ -496,6 +516,16 @@ async fn main() -> Result<()> {
     // Shared config for dashboard (and auto-tuner)
     let shared_config = Arc::new(tokio::sync::RwLock::new(config.clone()));
 
+    // Spawn learning evolver task (state already created earlier so the
+    // strategy engine task could capture it).
+    {
+        let st = learning_state.clone();
+        tokio::spawn(async move {
+            info!("Learning evolver task started");
+            learning::run_learning_evolver(st).await;
+        });
+    }
+
     // Auto-tuner: heuristic agent that adjusts strategy parameters from
     // recent trade performance every 5 minutes.
     let auto_tuner_state = Arc::new(Mutex::new(auto_tuner::AutoTunerState::default()));
@@ -583,6 +613,7 @@ async fn main() -> Result<()> {
             connected_exchanges,
             strategy_votes,
             auto_tuner_state,
+            learning_state,
             ws_tx,
         };
         tokio::spawn(dashboard::start_dashboard(dash_state));

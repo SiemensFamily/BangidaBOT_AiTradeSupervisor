@@ -179,6 +179,7 @@
         <button class="tab-btn" onclick="switchTab('tradelog')">Trade Log</button>
         <button class="tab-btn" onclick="switchTab('analyst')">Analyst Log</button>
         <button class="tab-btn" onclick="switchTab('livebot')">Live Bot</button>
+        <button class="tab-btn" onclick="switchTab('learning')">Learning</button>
         <button class="tab-btn" onclick="switchTab('settings')">Settings</button>
         <button class="tab-btn" onclick="switchTab('tradelogic')">Trade Logic</button>
     </div>
@@ -286,6 +287,53 @@
         </div>
         <div class="terminal" id="livebotOutput">
             <div class="term-line"><span class="msg" style="color:#484f58;">Loading...</span></div>
+        </div>
+    </div>
+
+    <!-- Learning Mode Tab -->
+    <div class="tab-content" id="tab-learning">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0 12px 0;">
+            <div>
+                <div style="font-size:1.1em;color:#58a6ff;font-weight:bold;">Learning Mode (Genetic Algorithm)</div>
+                <div style="font-size:0.78em;color:#8b949e;">Population shadow-evaluates against the live market. Best parameters can be promoted to live config.</div>
+            </div>
+            <div style="display:flex;gap:8px;">
+                <button class="btn" id="learnToggleBtn" onclick="toggleLearning()">Pause</button>
+            </div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;">
+            <div class="card"><div class="row"><span class="lbl">Generation</span><span id="lrnGen">0</span></div></div>
+            <div class="card"><div class="row"><span class="lbl">Population</span><span id="lrnPop">0</span></div></div>
+            <div class="card"><div class="row"><span class="lbl">Total Ticks</span><span id="lrnTicks">0</span></div></div>
+            <div class="card"><div class="row"><span class="lbl">Best Fitness</span><span id="lrnBestFit">0.00</span></div></div>
+            <div class="card"><div class="row"><span class="lbl">Avg Fitness</span><span id="lrnAvgFit">0.00</span></div></div>
+            <div class="card"><div class="row"><span class="lbl">Best PnL (sim)</span><span id="lrnBestPnl">0.00</span></div></div>
+            <div class="card"><div class="row"><span class="lbl">Status</span><span class="badge ok" id="lrnStatus">RUNNING</span></div></div>
+            <div class="card"><div class="row"><span class="lbl">Last Evolve</span><span id="lrnLastEvolve">--</span></div></div>
+        </div>
+        <div style="font-size:0.85em;color:#8b949e;margin:8px 0 4px 0;">Top 5 Candidates</div>
+        <div class="log-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Fitness</th>
+                        <th>PnL</th>
+                        <th>Wins</th>
+                        <th>Losses</th>
+                        <th>WR</th>
+                        <th>PF</th>
+                        <th>Imb</th>
+                        <th>TP</th>
+                        <th>SL</th>
+                        <th>RSI lo/hi</th>
+                        <th>ADX min</th>
+                        <th>ST?</th>
+                        <th>Hold</th>
+                    </tr>
+                </thead>
+                <tbody id="lrnCandidatesBody"></tbody>
+            </table>
         </div>
     </div>
 
@@ -689,6 +737,11 @@ function updateUI(d) {
         }).join('');
     }
 
+    // Learning mode panel
+    if (d.learning) {
+        renderLearning(d.learning);
+    }
+
     // Auto-tuner badge
     if (d.auto_tuner) {
         const tb = document.getElementById('tunerBadge');
@@ -770,6 +823,72 @@ function connect() {
     ws.onmessage = e => { try { updateUI(JSON.parse(e.data)); } catch(err) { console.error(err); } };
 }
 connect();
+
+/* ── Learning mode rendering ── */
+function renderLearning(d) {
+    if (!d) return;
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+    set('lrnGen', d.generation);
+    set('lrnPop', d.population_size);
+    set('lrnTicks', d.total_ticks.toLocaleString());
+    set('lrnBestFit', d.best_fitness.toFixed(2));
+    set('lrnAvgFit', d.avg_fitness.toFixed(2));
+    set('lrnBestPnl', '$' + d.best_pnl.toFixed(2));
+    const stat = document.getElementById('lrnStatus');
+    if (stat) {
+        stat.textContent = d.enabled ? 'RUNNING' : 'PAUSED';
+        stat.className = 'badge ' + (d.enabled ? 'ok' : 'halt');
+    }
+    const btn = document.getElementById('learnToggleBtn');
+    if (btn) btn.textContent = d.enabled ? 'Pause' : 'Resume';
+    const last = document.getElementById('lrnLastEvolve');
+    if (last) {
+        if (d.last_evolve_ms > 0) {
+            const sec = Math.floor((Date.now() - d.last_evolve_ms) / 1000);
+            last.textContent = sec < 60 ? sec + 's ago' : Math.floor(sec/60) + 'm ago';
+        } else {
+            last.textContent = 'never';
+        }
+    }
+    const tb = document.getElementById('lrnCandidatesBody');
+    if (tb && d.top_candidates) {
+        tb.innerHTML = d.top_candidates.map(c => {
+            const g = c.genome || {};
+            const pnlClass = c.net_pnl >= 0 ? 'pos' : 'neg';
+            return '<tr>' +
+                '<td>' + c.id + '</td>' +
+                '<td>' + c.fitness.toFixed(2) + '</td>' +
+                '<td class="' + pnlClass + '">' + c.net_pnl.toFixed(2) + '</td>' +
+                '<td>' + c.wins + '</td>' +
+                '<td>' + c.losses + '</td>' +
+                '<td>' + (c.win_rate * 100).toFixed(0) + '%</td>' +
+                '<td>' + c.profit_factor.toFixed(2) + '</td>' +
+                '<td>' + (g.imbalance_threshold || 0).toFixed(2) + '</td>' +
+                '<td>' + (g.take_profit_ticks || 0) + '</td>' +
+                '<td>' + (g.stop_loss_ticks || 0) + '</td>' +
+                '<td>' + (g.rsi_oversold || 0).toFixed(0) + '/' + (g.rsi_overbought || 0).toFixed(0) + '</td>' +
+                '<td>' + (g.adx_min || 0).toFixed(0) + '</td>' +
+                '<td>' + (g.use_supertrend_filter ? 'Y' : 'N') + '</td>' +
+                '<td>' + (g.max_hold_secs || 0) + 's</td>' +
+                '</tr>';
+        }).join('');
+    }
+}
+
+async function toggleLearning() {
+    const stat = document.getElementById('lrnStatus');
+    const currentlyOn = stat && stat.textContent === 'RUNNING';
+    try {
+        const r = await fetch('/api/learning/enabled', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: !currentlyOn }),
+        });
+        if (!r.ok) alert('Failed: ' + await r.text());
+    } catch (e) {
+        alert('Error: ' + e);
+    }
+}
 
 /* ── Circuit breaker controls ── */
 async function toggleCircuitBreaker() {
