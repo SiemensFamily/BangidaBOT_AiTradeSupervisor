@@ -440,7 +440,17 @@ fn display_walk_forward(wf_rows: &[WalkForwardRow], args: &Args, venue: Venue) {
     println!();
 
     // Filter: only keep combos with sufficient trades in BOTH halves.
-    let half_min = (args.min_trades / 2).max(2);
+    // Filter: only keep combos with sufficient trades in BOTH halves.
+    // In walk-forward mode, --min-trades is reinterpreted as PER HALF
+    // (not total). Hardcode a statistical floor of 10 per half — anything
+    // less gets too noisy for a meaningful verdict. If the user passes
+    // a higher --min-trades, honor that.
+    let half_min = args.min_trades.max(10);
+    println!(
+        "Walk-forward filter: minimum {} trades per half (hardcoded floor 10)",
+        half_min
+    );
+    println!();
     let mut qualified: Vec<&WalkForwardRow> = wf_rows
         .iter()
         .filter(|r| r.first.total_trades >= half_min && r.second.total_trades >= half_min)
@@ -531,19 +541,27 @@ fn display_walk_forward(wf_rows: &[WalkForwardRow], args: &Args, venue: Venue) {
     println!();
 
     // Walk-forward verdict: look at the best combo's WORST half.
+    // Also require a minimum sample size per half — a 2/2 trade split
+    // with PF 6.0 is noise, not edge.
     let verdict = if let Some(best) = qualified.first() {
-        let worst = best.worst_pf();
-        if worst >= 1.5 {
-            "✓✓ ROBUST EDGE — top combo PF ≥ 1.5 on BOTH halves. Candidate for live."
-        } else if worst >= 1.2 {
-            "✓  PROMISING — top combo holds PF ≥ 1.2 across regimes. Iterate wider."
-        } else if worst >= 0.9 {
-            "○  FRAGILE — top combo breaks on one half. Not yet trustable."
+        let worst_pf = best.worst_pf();
+        let min_n = best.first.total_trades.min(best.second.total_trades);
+
+        if min_n < 10 {
+            "○  INSUFFICIENT SAMPLE — need ≥10 trades per half for a trustable verdict."
+        } else if worst_pf >= 1.5 && min_n >= 20 {
+            "✓✓ ROBUST EDGE — PF ≥ 1.5 on both halves with ≥20 trades each. Candidate for live."
+        } else if worst_pf >= 1.5 {
+            "✓  STRONG but THIN — PF ≥ 1.5 on both halves but only 10-19 trades/half. Widen grid."
+        } else if worst_pf >= 1.2 {
+            "○  PROMISING — PF ≥ 1.2 across regimes. Iterate on wider grids."
+        } else if worst_pf >= 0.9 {
+            "✗  FRAGILE — top combo breaks on one half. Overfit noise, not edge."
         } else {
-            "✗  NO ROBUST EDGE — top combo fails one half. Overfit or unlucky."
+            "✗  NO ROBUST EDGE — top combo fails one half. Pivot strategy."
         }
     } else {
-        "✗  INSUFFICIENT DATA — no combo fired in both halves."
+        "✗  INSUFFICIENT DATA — no combo fired with ≥10 trades in both halves."
     };
     println!("Walk-forward verdict: {}", verdict);
     println!();
