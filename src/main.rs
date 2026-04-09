@@ -749,6 +749,20 @@ fn build_strategies(config: &ScalperConfig) -> Vec<Box<dyn Strategy>> {
             ),
         ));
     }
+    if config.strategy.donchian.enabled {
+        strategies.push(Box::new(
+            scalper_strategy::donchian::DonchianStrategy::new(
+                config.strategy.donchian.clone(),
+            ),
+        ));
+    }
+    if config.strategy.ma_cross.enabled {
+        strategies.push(Box::new(
+            scalper_strategy::ma_cross::MaCrossStrategy::new(
+                config.strategy.ma_cross.clone(),
+            ),
+        ));
+    }
 
     info!("Loaded {} strategies", strategies.len());
     strategies
@@ -1239,6 +1253,12 @@ async fn build_market_context(
         rsi_14: rsi_val,
         ema_9: ema9_val,
         ema_21: ema21_val,
+        // Long EMAs not yet computed by the live indicator stack — default
+        // to the short EMAs so crossover strategies running live produce
+        // neutral signals until the live stack is extended. The backtest
+        // harness computes these properly.
+        ema_50: ema21_val,
+        ema_200: ema21_val,
         macd_histogram: histogram,
         bollinger_upper: bb_upper,
         bollinger_lower: bb_lower,
@@ -1269,6 +1289,10 @@ async fn build_market_context(
         funding_rate_secondary: funding,
         open_interest: None,
         price_velocity_30s,
+        // Donchian channels are computed per-bar in the replay engine; the
+        // live bot doesn't compute them yet because swing strategies
+        // aren't enabled live until backtest validates them.
+        donchian: Default::default(),
         timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
     })
 }

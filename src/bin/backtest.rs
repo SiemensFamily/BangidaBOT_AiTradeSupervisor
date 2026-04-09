@@ -19,8 +19,10 @@ use scalper_backtest::historical::{load_candles_ex, Venue};
 use scalper_backtest::replay::{replay_with_costs, CostModel};
 use scalper_core::config::ScalperConfig;
 use scalper_strategy::ensemble::EnsembleStrategy;
+use scalper_strategy::donchian::DonchianStrategy;
 use scalper_strategy::funding_arb::FundingBiasStrategy;
 use scalper_strategy::liquidation_wick::LiquidationWickStrategy;
+use scalper_strategy::ma_cross::MaCrossStrategy;
 use scalper_strategy::mean_reversion::MeanReversionStrategy;
 use scalper_strategy::momentum::MomentumStrategy;
 use scalper_strategy::ob_imbalance::ObImbalanceStrategy;
@@ -195,6 +197,12 @@ fn build_strategies(config: &ScalperConfig) -> Vec<Box<dyn Strategy>> {
     }
     if config.strategy.mean_reversion.enabled {
         strategies.push(Box::new(MeanReversionStrategy::new(config.strategy.mean_reversion.clone())));
+    }
+    if config.strategy.donchian.enabled {
+        strategies.push(Box::new(DonchianStrategy::new(config.strategy.donchian.clone())));
+    }
+    if config.strategy.ma_cross.enabled {
+        strategies.push(Box::new(MaCrossStrategy::new(config.strategy.ma_cross.clone())));
     }
     strategies
 }

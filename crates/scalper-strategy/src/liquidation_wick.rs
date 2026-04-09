@@ -124,6 +124,8 @@ mod tests {
             rsi_14: 25.0,
             ema_9: 49000.0,
             ema_21: 49500.0,
+            ema_50: 49700.0,
+            ema_200: 49800.0,
             macd_histogram: -50.0,
             bollinger_upper: 51000.0,
             bollinger_lower: 47000.0,
@@ -154,6 +156,7 @@ mod tests {
             psar_long: true,
             supertrend: 0.0,
             supertrend_up: true,
+            donchian: Default::default(),
             timestamp_ms: 1000000,
         }
     }

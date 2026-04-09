@@ -225,6 +225,8 @@ mod tests {
             rsi_14: 50.0,
             ema_9: 50000.0,
             ema_21: 50000.0,
+            ema_50: 50000.0,
+            ema_200: 50000.0,
             macd_histogram: 0.0,
             bollinger_upper: 50200.0,
             bollinger_lower: 49800.0,
@@ -255,6 +257,7 @@ mod tests {
             funding_rate_secondary: 0.0,
             open_interest: None,
             price_velocity_30s: 0.0,
+            donchian: Default::default(),
             timestamp_ms: 1000000,
         }
     }

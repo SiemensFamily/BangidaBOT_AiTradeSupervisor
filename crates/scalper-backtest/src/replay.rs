@@ -31,7 +31,7 @@ use rust_decimal::prelude::FromPrimitive;
 use scalper_core::types::{Exchange, Side, Trend, VolatilityRegime};
 use scalper_data::indicators::*;
 use scalper_strategy::ensemble::EnsembleStrategy;
-use scalper_strategy::traits::MarketContext;
+use scalper_strategy::traits::{DonchianSnapshot, MarketContext};
 
 use crate::historical::Candle;
 use crate::report::{BacktestReport, ReportBuilder};
@@ -81,11 +81,14 @@ struct OpenPosition {
 }
 
 /// Indicator stack — mirrors the live bot's IndicatorState but owned
-/// by the backtest so it's isolated from live state.
+/// by the backtest so it's isolated from live state. Extended for
+/// swing trading with EMA-50 and EMA-200 (classic moving-average crossovers).
 struct IndicatorStack {
     rsi: RSI,
     ema_9: EMA,
     ema_21: EMA,
+    ema_50: EMA,
+    ema_200: EMA,
     macd: MACD,
     bb: BollingerBands,
     vwap: VWAP,
@@ -106,6 +109,8 @@ impl IndicatorStack {
             rsi: RSI::new(14),
             ema_9: EMA::new(9),
             ema_21: EMA::new(21),
+            ema_50: EMA::new(50),
+            ema_200: EMA::new(200),
             macd: MACD::new(12, 26, 9),
             bb: BollingerBands::new(20, 2.0),
             vwap: VWAP::new(),
@@ -126,6 +131,8 @@ impl IndicatorStack {
         self.rsi.update(c.close);
         self.ema_9.update(c.close);
         self.ema_21.update(c.close);
+        self.ema_50.update(c.close);
+        self.ema_200.update(c.close);
         self.macd.update(c.close);
         self.bb.update(c.close);
         self.stoch_rsi.update(c.close);
@@ -149,6 +156,74 @@ impl IndicatorStack {
             && self.macd.is_ready()
             && self.bb.is_ready()
             && self.atr.is_ready()
+    }
+}
+
+/// Rolling window of candle highs and lows, used to compute Donchian
+/// channels at arbitrary periods from a single stored history. Keeps the
+/// last `capacity` bars and exposes `high_over(n)` / `low_over(n)` methods
+/// for any n up to capacity.
+struct DonchianWindow {
+    highs: std::collections::VecDeque<f64>,
+    lows: std::collections::VecDeque<f64>,
+    capacity: usize,
+}
+
+impl DonchianWindow {
+    fn new(capacity: usize) -> Self {
+        Self {
+            highs: std::collections::VecDeque::with_capacity(capacity),
+            lows: std::collections::VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn push(&mut self, high: f64, low: f64) {
+        self.highs.push_back(high);
+        self.lows.push_back(low);
+        while self.highs.len() > self.capacity {
+            self.highs.pop_front();
+            self.lows.pop_front();
+        }
+    }
+
+    /// Highest high over the last `n` bars (or all available if fewer).
+    fn high_over(&self, n: usize) -> f64 {
+        let take = n.min(self.highs.len());
+        if take == 0 {
+            return 0.0;
+        }
+        self.highs
+            .iter()
+            .rev()
+            .take(take)
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max)
+    }
+
+    /// Lowest low over the last `n` bars (or all available if fewer).
+    fn low_over(&self, n: usize) -> f64 {
+        let take = n.min(self.lows.len());
+        if take == 0 {
+            return 0.0;
+        }
+        self.lows
+            .iter()
+            .rev()
+            .take(take)
+            .cloned()
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    fn snapshot(&self) -> DonchianSnapshot {
+        DonchianSnapshot {
+            upper_10: self.high_over(10),
+            lower_10: self.low_over(10),
+            upper_20: self.high_over(20),
+            lower_20: self.low_over(20),
+            upper_55: self.high_over(55),
+            lower_55: self.low_over(55),
+        }
     }
 }
 
@@ -202,6 +277,7 @@ fn synth_ctx(
     c: &Candle,
     ind: &IndicatorStack,
     window: &HighLowWindow,
+    donchian: &DonchianWindow,
 ) -> MarketContext {
     let mid = c.close;
     let spread = (c.high - c.low).max(c.close * 0.0001); // at least 1 bp
@@ -259,6 +335,8 @@ fn synth_ctx(
         rsi_14: ind.rsi.value(),
         ema_9: ind.ema_9.value(),
         ema_21: ind.ema_21.value(),
+        ema_50: ind.ema_50.value(),
+        ema_200: ind.ema_200.value(),
         macd_histogram: hist,
         bollinger_upper: bb_upper,
         bollinger_lower: bb_lower,
@@ -303,6 +381,7 @@ fn synth_ctx(
         funding_rate_secondary: 0.0,
         open_interest: None,
         price_velocity_30s: 0.0,
+        donchian: donchian.snapshot(),
         timestamp_ms: c.time_ms,
     }
 }
@@ -343,6 +422,10 @@ pub fn replay_with_costs(
 ) -> BacktestReport {
     let mut ind = IndicatorStack::new();
     let mut window = HighLowWindow::new(60);
+    // Donchian window holds enough bars for the longest period we expose
+    // (upper_55 / lower_55). Keep an extra cushion so the rolling max/min
+    // stays cheap to compute.
+    let mut donchian_window = DonchianWindow::new(60);
     let mut report = ReportBuilder::new(notional);
     let mut open: Option<OpenPosition> = None;
 
@@ -352,7 +435,14 @@ pub fn replay_with_costs(
     for (i, c) in candles.iter().enumerate() {
         ind.update(c);
         window.push(c.high, c.low, c.volume);
+        // Note: donchian_window is pushed AFTER synth_ctx below, so
+        // the donchian snapshot reflects the PRIOR N bars (excluding the
+        // current bar). That's the classic definition: "buy when today's
+        // close exceeds the highest high of the last N bars". If we pushed
+        // before evaluation, today's close could never exceed today's high,
+        // and the strategy would never fire.
         if !ind.is_ready() {
+            donchian_window.push(c.high, c.low);
             continue;
         }
 
@@ -399,9 +489,11 @@ pub fn replay_with_costs(
             }
         }
 
-        // 2. Look for a new entry if no position is open
+        // 2. Look for a new entry if no position is open. Build context
+        // using the donchian window BEFORE pushing this bar (so it reflects
+        // the prior N bars). Then push the current bar after the entry check.
         if open.is_none() {
-            let ctx = synth_ctx(symbol, c, &ind, &window);
+            let ctx = synth_ctx(symbol, c, &ind, &window, &donchian_window);
             if let Some(signal) = ensemble.evaluate(&ctx) {
                 let entry_slipped = match signal.side {
                     Side::Buy => c.close * (1.0 + slip),
@@ -432,6 +524,10 @@ pub fn replay_with_costs(
                 });
             }
         }
+
+        // Push the current bar into the donchian window AFTER entry
+        // evaluation. The next bar's synth_ctx will see this bar included.
+        donchian_window.push(c.high, c.low);
     }
 
     // Close any remaining position at the last close

@@ -19,12 +19,150 @@ use scalper_backtest::historical::{load_candles_ex, Candle, Venue};
 use scalper_backtest::replay::{replay_with_costs, CostModel};
 use scalper_backtest::report::BacktestReport;
 use scalper_core::config::{ScalperConfig, StrategyConfig};
+use scalper_strategy::donchian::DonchianStrategy;
 use scalper_strategy::ensemble::EnsembleStrategy;
+use scalper_strategy::ma_cross::MaCrossStrategy;
 use scalper_strategy::mean_reversion::MeanReversionStrategy;
 use scalper_strategy::momentum::MomentumStrategy;
 use scalper_strategy::ob_imbalance::ObImbalanceStrategy;
 use scalper_strategy::traits::Strategy;
 use std::io::Write;
+
+/// Which parameter columns to render for each strategy family. Picked by
+/// the --strategies flag — makes the top-N and per-bucket tables show
+/// meaningful params instead of hardcoding momentum_ob columns for everything.
+#[derive(Debug, Clone, Copy)]
+enum ParamView {
+    MomentumOb,
+    MeanRev,
+    Donchian,
+    MaCross,
+    SwingAll,
+}
+
+fn parse_param_view(strategy_set: &str) -> ParamView {
+    match strategy_set {
+        "mean_reversion" => ParamView::MeanRev,
+        "donchian" => ParamView::Donchian,
+        "ma_cross" => ParamView::MaCross,
+        "swing_all" => ParamView::SwingAll,
+        "all" => ParamView::MomentumOb,
+        _ => ParamView::MomentumOb,
+    }
+}
+
+fn params_header_for(view: ParamView) -> &'static str {
+    match view {
+        ParamView::MomentumOb => "Params (thr|m_tp|m_sl|ob_thr|ob_tp|ob_sl)",
+        ParamView::MeanRev => "Params (thr|rsi_os|bb_pen|atr_tp|atr_sl|max_adx)",
+        ParamView::Donchian => "Params (thr|entry|atr_tp|atr_sl|trend)",
+        ParamView::MaCross => "Params (thr|fast/slow|min_sp|atr_tp|atr_sl)",
+        ParamView::SwingAll => "Params (thr|dc_entry|dc_tp|mc_pair|mc_tp)",
+    }
+}
+
+/// Compact one-line render of the params for a row, matching the header
+/// column widths from `params_header_for`.
+fn format_params(row: &SweepRow, view: ParamView) -> String {
+    match view {
+        ParamView::MomentumOb => format!(
+            "{:.2}|{:>4.2}|{:>4.2}|{:>4.2}|{:>3}|{:>3}",
+            row.ensemble_threshold,
+            row.momentum_tp_pct,
+            row.momentum_sl_pct,
+            row.ob_imbalance_threshold,
+            row.ob_tp_ticks,
+            row.ob_sl_ticks,
+        ),
+        ParamView::MeanRev => format!(
+            "{:.2}|{:>5.1}|{:>5.2}|{:>4.2}|{:>4.2}|{:>4.1}",
+            row.ensemble_threshold,
+            row.mr_rsi_oversold,
+            row.mr_bb_penetration,
+            row.mr_atr_tp,
+            row.mr_atr_sl,
+            row.mr_max_adx,
+        ),
+        ParamView::Donchian => format!(
+            "{:.2}|{:>3}|{:>4.1}|{:>4.1}|{}",
+            row.ensemble_threshold,
+            row.dc_entry_period,
+            row.dc_atr_tp,
+            row.dc_atr_stop,
+            if row.dc_trend_filter { " y" } else { " n" },
+        ),
+        ParamView::MaCross => format!(
+            "{:.2}|{:>3}/{:<3}|{:>5.3}|{:>4.1}|{:>4.1}",
+            row.ensemble_threshold,
+            row.mc_fast,
+            row.mc_slow,
+            row.mc_min_spread_pct,
+            row.mc_atr_tp,
+            row.mc_atr_stop,
+        ),
+        ParamView::SwingAll => format!(
+            "{:.2}|{:>3}|{:>4.1}|{:>3}/{:<3}|{:>4.1}",
+            row.ensemble_threshold,
+            row.dc_entry_period,
+            row.dc_atr_tp,
+            row.mc_fast,
+            row.mc_slow,
+            row.mc_atr_tp,
+        ),
+    }
+}
+
+/// Multi-line verbose render of the params for a row, used by the
+/// per-bucket "best combo" display.
+fn format_params_verbose(row: &SweepRow, view: ParamView) -> String {
+    match view {
+        ParamView::MomentumOb => format!(
+            "thr={:.2} m_tp={:.2} m_sl={:.2} ob_thr={:.2} ob_tp={} ob_sl={}",
+            row.ensemble_threshold,
+            row.momentum_tp_pct,
+            row.momentum_sl_pct,
+            row.ob_imbalance_threshold,
+            row.ob_tp_ticks,
+            row.ob_sl_ticks,
+        ),
+        ParamView::MeanRev => format!(
+            "thr={:.2} rsi_os={:.0} bb_pen={:.2} atr_tp={:.2} atr_sl={:.2} adx_max={:.0}",
+            row.ensemble_threshold,
+            row.mr_rsi_oversold,
+            row.mr_bb_penetration,
+            row.mr_atr_tp,
+            row.mr_atr_sl,
+            row.mr_max_adx,
+        ),
+        ParamView::Donchian => format!(
+            "thr={:.2} entry={} atr_tp={:.1} atr_stop={:.1} trend_filter={}",
+            row.ensemble_threshold,
+            row.dc_entry_period,
+            row.dc_atr_tp,
+            row.dc_atr_stop,
+            row.dc_trend_filter,
+        ),
+        ParamView::MaCross => format!(
+            "thr={:.2} fast={} slow={} min_spread={:.3} atr_tp={:.1} atr_stop={:.1}",
+            row.ensemble_threshold,
+            row.mc_fast,
+            row.mc_slow,
+            row.mc_min_spread_pct,
+            row.mc_atr_tp,
+            row.mc_atr_stop,
+        ),
+        ParamView::SwingAll => format!(
+            "thr={:.2} dc_entry={} dc_tp={:.1} dc_stop={:.1} mc={}/{} mc_tp={:.1}",
+            row.ensemble_threshold,
+            row.dc_entry_period,
+            row.dc_atr_tp,
+            row.dc_atr_stop,
+            row.mc_fast,
+            row.mc_slow,
+            row.mc_atr_tp,
+        ),
+    }
+}
 
 #[derive(Debug)]
 struct Args {
@@ -129,7 +267,13 @@ OPTIONS:
   -v, --venue <V>          kraken | binance (default: kraken)
       --min-trades <N>     Skip combos with fewer trades than this (default: 5)
       --top <N>            Show top-N combos (default: 10)
-      --strategies <SET>   momentum_ob | mean_reversion | all (default: momentum_ob)
+      --strategies <SET>   Strategy family to sweep:
+                             momentum_ob    - the live scalping strategies (default)
+                             mean_reversion - BB/RSI-based mean reversion
+                             donchian       - Turtle-style channel breakout (swing)
+                             ma_cross       - EMA crossover (swing)
+                             swing_all      - Donchian + MA cross ensemble
+                             all            - momentum + OB + mean_reversion
       --from-file <PATH>   Load candles from a local JSON file instead of
                            fetching from the venue
       --walk-forward       Split the candles 50/50, run the full grid on
@@ -140,14 +284,23 @@ OPTIONS:
   -h, --help               Show this help
 
 EXAMPLES:
-  # Sweep the current live strategies on 30 days of 5m Kraken BTC
-  cargo run --release --bin backtest_sweep -- -r 5m -d 30
+  # Sweep Donchian breakout on 1-2 years of daily BTC (swing trading)
+  cargo run --release --bin backtest_sweep -- \
+      --strategies donchian -s PI_XBTUSD -r 1d -d 730 --walk-forward
 
-  # Sweep on Binance (2 bps fee, not 5 bps)
-  cargo run --release --bin backtest_sweep -- -v binance -s BTCUSDT -r 5m -d 30
+  # Sweep MA crossover on 1 year of 4h ETH
+  cargo run --release --bin backtest_sweep -- \
+      --strategies ma_cross -s PI_ETHUSD -r 4h -d 365 --walk-forward
 
-  # Sweep the mean-reversion strategy on 15m bars
+  # Full swing ensemble (Donchian + MA cross)
+  cargo run --release --bin backtest_sweep -- \
+      --strategies swing_all -s PI_XBTUSD -r 1d -d 730 --walk-forward
+
+  # Sweep mean reversion on 15m (the scalping experiment)
   cargo run --release --bin backtest_sweep -- --strategies mean_reversion -r 15m -d 30
+
+  # Sweep the original scalping strategies (momentum + OB imbalance)
+  cargo run --release --bin backtest_sweep -- -r 5m -d 30
 "#
     );
 }
@@ -168,6 +321,17 @@ struct SweepRow {
     mr_atr_tp: f64,
     mr_atr_sl: f64,
     mr_max_adx: f64,
+    // Donchian params
+    dc_entry_period: u32,
+    dc_atr_tp: f64,
+    dc_atr_stop: f64,
+    dc_trend_filter: bool,
+    // MA crossover params
+    mc_fast: u32,
+    mc_slow: u32,
+    mc_min_spread_pct: f64,
+    mc_atr_tp: f64,
+    mc_atr_stop: f64,
     // Results
     total_trades: u64,
     win_rate: f64,
@@ -212,6 +376,15 @@ impl SweepRow {
             mr_atr_tp: params.mr_atr_tp,
             mr_atr_sl: params.mr_atr_sl,
             mr_max_adx: params.mr_max_adx,
+            dc_entry_period: params.dc_entry_period,
+            dc_atr_tp: params.dc_atr_tp,
+            dc_atr_stop: params.dc_atr_stop,
+            dc_trend_filter: params.dc_trend_filter,
+            mc_fast: params.mc_fast,
+            mc_slow: params.mc_slow,
+            mc_min_spread_pct: params.mc_min_spread_pct,
+            mc_atr_tp: params.mc_atr_tp,
+            mc_atr_stop: params.mc_atr_stop,
             total_trades: r.total_trades,
             win_rate: r.win_rate,
             profit_factor: if r.profit_factor.is_finite() { r.profit_factor } else { 999.0 },
@@ -237,6 +410,17 @@ struct SweepParams {
     mr_atr_tp: f64,
     mr_atr_sl: f64,
     mr_max_adx: f64,
+    // Donchian params
+    dc_entry_period: u32,
+    dc_atr_tp: f64,
+    dc_atr_stop: f64,
+    dc_trend_filter: bool,
+    // MA crossover params
+    mc_fast: u32,
+    mc_slow: u32,
+    mc_min_spread_pct: f64,
+    mc_atr_tp: f64,
+    mc_atr_stop: f64,
 }
 
 impl SweepParams {
@@ -254,6 +438,15 @@ impl SweepParams {
         cfg.mean_reversion.atr_tp_multiplier = self.mr_atr_tp;
         cfg.mean_reversion.atr_sl_multiplier = self.mr_atr_sl;
         cfg.mean_reversion.max_adx = self.mr_max_adx;
+        cfg.donchian.entry_period = self.dc_entry_period;
+        cfg.donchian.atr_tp_multiplier = self.dc_atr_tp;
+        cfg.donchian.atr_stop_multiplier = self.dc_atr_stop;
+        cfg.donchian.use_trend_filter = self.dc_trend_filter;
+        cfg.ma_cross.fast_period = self.mc_fast;
+        cfg.ma_cross.slow_period = self.mc_slow;
+        cfg.ma_cross.min_spread_pct = self.mc_min_spread_pct;
+        cfg.ma_cross.atr_tp_multiplier = self.mc_atr_tp;
+        cfg.ma_cross.atr_stop_multiplier = self.mc_atr_stop;
     }
 }
 
@@ -274,11 +467,104 @@ fn build_grid(strategy_set: &str) -> Vec<SweepParams> {
         mr_atr_tp: 1.5,
         mr_atr_sl: 1.0,
         mr_max_adx: 25.0,
+        dc_entry_period: 20,
+        dc_atr_tp: 4.0,
+        dc_atr_stop: 2.0,
+        dc_trend_filter: false,
+        mc_fast: 21,
+        mc_slow: 50,
+        mc_min_spread_pct: 0.005,
+        mc_atr_tp: 3.0,
+        mc_atr_stop: 1.5,
     };
 
     let mut grid = Vec::new();
 
     match strategy_set {
+        "donchian" => {
+            // Sweep Donchian params only. Classic Turtle entry/exit.
+            for &threshold in &[0.15_f64, 0.25] {
+                for &entry_period in &[10_u32, 20, 55] {
+                    for &atr_tp in &[2.0_f64, 4.0, 6.0, 8.0] {
+                        for &atr_stop in &[1.5_f64, 2.0, 3.0] {
+                            for &trend_filter in &[false, true] {
+                                grid.push(SweepParams {
+                                    ensemble_threshold: threshold,
+                                    dc_entry_period: entry_period,
+                                    dc_atr_tp: atr_tp,
+                                    dc_atr_stop: atr_stop,
+                                    dc_trend_filter: trend_filter,
+                                    ..default
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        "ma_cross" => {
+            // Sweep MA crossover params. The valid (fast, slow) pairs are
+            // constrained to the pre-computed EMAs: 9, 21, 50, 200.
+            let pairs: &[(u32, u32)] = &[
+                (9, 21),
+                (9, 50),
+                (21, 50),
+                (21, 200),
+                (50, 200),
+            ];
+            for &threshold in &[0.15_f64, 0.25] {
+                for &(fast, slow) in pairs {
+                    for &min_spread in &[0.001_f64, 0.005, 0.01, 0.02] {
+                        for &atr_tp in &[2.0_f64, 3.0, 4.0, 5.0] {
+                            for &atr_stop in &[1.0_f64, 1.5, 2.0] {
+                                grid.push(SweepParams {
+                                    ensemble_threshold: threshold,
+                                    mc_fast: fast,
+                                    mc_slow: slow,
+                                    mc_min_spread_pct: min_spread,
+                                    mc_atr_tp: atr_tp,
+                                    mc_atr_stop: atr_stop,
+                                    ..default
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        "swing_all" => {
+            // Run both Donchian + MA cross as an ensemble. Narrower per-strategy
+            // grid to keep total size reasonable.
+            let pairs: &[(u32, u32)] = &[(21, 50), (50, 200)];
+            for &threshold in &[0.15_f64, 0.25] {
+                for &dc_entry in &[20_u32, 55] {
+                    for &dc_atr_tp in &[3.0_f64, 5.0] {
+                        for &dc_atr_stop in &[1.5_f64, 2.5] {
+                            for &(fast, slow) in pairs {
+                                for &mc_atr_tp in &[3.0_f64, 4.0] {
+                                    for &mc_atr_stop in &[1.0_f64, 1.5] {
+                                        for &trend_filter in &[false, true] {
+                                            grid.push(SweepParams {
+                                                ensemble_threshold: threshold,
+                                                dc_entry_period: dc_entry,
+                                                dc_atr_tp,
+                                                dc_atr_stop,
+                                                dc_trend_filter: trend_filter,
+                                                mc_fast: fast,
+                                                mc_slow: slow,
+                                                mc_atr_tp,
+                                                mc_atr_stop,
+                                                ..default
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         "mean_reversion" => {
             // Sweep MR params only
             for &threshold in &[0.15, 0.20, 0.25, 0.30] {
@@ -371,6 +657,25 @@ fn build_ensemble(cfg: &StrategyConfig, set: &str) -> EnsembleStrategy {
             let mut mr_cfg = cfg.mean_reversion.clone();
             mr_cfg.enabled = true;
             strategies.push(Box::new(MeanReversionStrategy::new(mr_cfg)));
+        }
+        "donchian" => {
+            let mut dc = cfg.donchian.clone();
+            dc.enabled = true;
+            strategies.push(Box::new(DonchianStrategy::new(dc)));
+        }
+        "ma_cross" => {
+            let mut mc = cfg.ma_cross.clone();
+            mc.enabled = true;
+            strategies.push(Box::new(MaCrossStrategy::new(mc)));
+        }
+        "swing_all" => {
+            let mut dc = cfg.donchian.clone();
+            dc.enabled = true;
+            strategies.push(Box::new(DonchianStrategy::new(dc)));
+
+            let mut mc = cfg.ma_cross.clone();
+            mc.enabled = true;
+            strategies.push(Box::new(MaCrossStrategy::new(mc)));
         }
         "all" => {
             let mut m = cfg.momentum.clone();
@@ -476,13 +781,8 @@ fn display_walk_forward(wf_rows: &[WalkForwardRow], args: &Args, venue: Venue) {
         println!("   Either the strategy is too rare-firing, or the candle set is");
         println!("   too short for a split. Lower --min-trades or widen the window.");
     } else {
-        // Adaptive param column based on strategy set
-        let show_mr = args.strategy_set == "mean_reversion";
-        let header = if show_mr {
-            "Params (thr|rsi_os|bb_pen|atr_tp|atr_sl|max_adx)"
-        } else {
-            "Params (thr|m_tp|m_sl|ob_thr|ob_tp|ob_sl)"
-        };
+        let view = parse_param_view(&args.strategy_set);
+        let header = params_header_for(view);
         println!(
             "{:>3}  {:>6}  {:>6}  {:>6}  {:>6}  {:>6}  {:>6}  {}",
             "#",
@@ -495,27 +795,7 @@ fn display_walk_forward(wf_rows: &[WalkForwardRow], args: &Args, venue: Venue) {
             header
         );
         for (i, r) in qualified.iter().take(args.top_n).enumerate() {
-            let params_str = if show_mr {
-                format!(
-                    "{:.2}|{:>5.1}|{:>5.2}|{:>4.2}|{:>4.2}|{:>4.1}",
-                    r.first.ensemble_threshold,
-                    r.first.mr_rsi_oversold,
-                    r.first.mr_bb_penetration,
-                    r.first.mr_atr_tp,
-                    r.first.mr_atr_sl,
-                    r.first.mr_max_adx,
-                )
-            } else {
-                format!(
-                    "{:.2}|{:>4.2}|{:>4.2}|{:>4.2}|{:>3}|{:>3}",
-                    r.first.ensemble_threshold,
-                    r.first.momentum_tp_pct,
-                    r.first.momentum_sl_pct,
-                    r.first.ob_imbalance_threshold,
-                    r.first.ob_tp_ticks,
-                    r.first.ob_sl_ticks,
-                )
-            };
+            let params_str = format_params(&r.first, view);
             let pf_fmt = |pf: f64| {
                 if pf.is_finite() && pf < 99.0 {
                     format!("{:>6.2}", pf)
@@ -812,12 +1092,8 @@ async fn main() -> Result<()> {
     }
     println!();
 
-    // Choose which param columns to show based on the strategy set
-    let (params_header, show_mr_params) = match args.strategy_set.as_str() {
-        "mean_reversion" => ("Params (thr|rsi_os|bb_pen|atr_tp|atr_sl|max_adx)", true),
-        "all" => ("Params (thr|m_tp|m_sl|ob_thr|ob_tp|rsi_os|atr_tp)", false), // will still show momentum_ob for "all"
-        _ => ("Params (thr|m_tp|m_sl|ob_thr|ob_tp_ticks|ob_sl_ticks)", false),
-    };
+    let view = parse_param_view(&args.strategy_set);
+    let params_header = params_header_for(view);
 
     println!(
         "──────────────────────── TOP {} (of {} qualified, min {} trades) ────────────────────────",
@@ -835,38 +1111,7 @@ async fn main() -> Result<()> {
             "#", "Trades", "Win%", "PF", "Net$", "DD%", "Sharpe", params_header
         );
         for (i, row) in qualified.iter().take(args.top_n).enumerate() {
-            let params_str = if show_mr_params {
-                format!(
-                    "{:.2}|{:>5.1}|{:>5.2}|{:>4.2}|{:>4.2}|{:>4.1}",
-                    row.ensemble_threshold,
-                    row.mr_rsi_oversold,
-                    row.mr_bb_penetration,
-                    row.mr_atr_tp,
-                    row.mr_atr_sl,
-                    row.mr_max_adx,
-                )
-            } else if args.strategy_set == "all" {
-                format!(
-                    "{:.2}|{:>4.2}|{:>4.2}|{:>4.2}|{:>3}|{:>4.1}|{:>4.2}",
-                    row.ensemble_threshold,
-                    row.momentum_tp_pct,
-                    row.momentum_sl_pct,
-                    row.ob_imbalance_threshold,
-                    row.ob_tp_ticks,
-                    row.mr_rsi_oversold,
-                    row.mr_atr_tp,
-                )
-            } else {
-                format!(
-                    "{:.2}|{:>4.2}|{:>4.2}|{:>4.2}|{:>3}|{:>3}",
-                    row.ensemble_threshold,
-                    row.momentum_tp_pct,
-                    row.momentum_sl_pct,
-                    row.ob_imbalance_threshold,
-                    row.ob_tp_ticks,
-                    row.ob_sl_ticks,
-                )
-            };
+            let params_str = format_params(row, view);
             println!(
                 "{:>4}  {:>7}  {:>5.1}%  {:>6.2}  {:>9.2}  {:>6.1}%  {:>7.2}  {}",
                 i + 1,
@@ -900,27 +1145,7 @@ async fn main() -> Result<()> {
             .filter(|r| r.profit_factor.is_finite() && r.profit_factor < 99.0)
             .max_by(|a, b| a.profit_factor.partial_cmp(&b.profit_factor).unwrap_or(std::cmp::Ordering::Equal));
         if let Some(row) = best {
-            let params_str = if show_mr_params {
-                format!(
-                    "thr={:.2} rsi_os={:.0} bb_pen={:.2} atr_tp={:.2} atr_sl={:.2} adx_max={:.0}",
-                    row.ensemble_threshold,
-                    row.mr_rsi_oversold,
-                    row.mr_bb_penetration,
-                    row.mr_atr_tp,
-                    row.mr_atr_sl,
-                    row.mr_max_adx,
-                )
-            } else {
-                format!(
-                    "thr={:.2} m_tp={:.2} m_sl={:.2} ob_thr={:.2} ob_tp={} ob_sl={}",
-                    row.ensemble_threshold,
-                    row.momentum_tp_pct,
-                    row.momentum_sl_pct,
-                    row.ob_imbalance_threshold,
-                    row.ob_tp_ticks,
-                    row.ob_sl_ticks,
-                )
-            };
+            let params_str = format_params_verbose(row, view);
             println!(
                 "  {:<14}  {:>6}  {:>5.1}%  {:>6.2}  {:>9.2}  {}",
                 label,
