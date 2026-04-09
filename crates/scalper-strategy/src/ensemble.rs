@@ -3,6 +3,21 @@ use tracing::debug;
 
 use crate::traits::{MarketContext, Strategy};
 
+/// Per-strategy vote from the last ensemble evaluation.
+#[derive(Debug, Clone)]
+pub struct StrategyVote {
+    pub name: String,
+    pub fired: bool,
+    pub side: Option<Side>,
+    pub strength: f64,
+}
+
+/// Result of a detailed ensemble evaluation.
+pub struct EvalResult {
+    pub signal: Option<Signal>,
+    pub votes: Vec<StrategyVote>,
+}
+
 /// Regime-adaptive ensemble strategy that combines signals from multiple
 /// child strategies using weighted voting.
 ///
@@ -47,12 +62,28 @@ impl EnsembleStrategy {
     }
 
     pub fn evaluate(&self, ctx: &MarketContext) -> Option<Signal> {
+        self.evaluate_detailed(ctx).signal
+    }
+
+    /// Evaluate all strategies and return both the ensemble signal and
+    /// per-strategy vote details for dashboard display.
+    pub fn evaluate_detailed(&self, ctx: &MarketContext) -> EvalResult {
+        let mut votes: Vec<StrategyVote> = Vec::new();
+
         if ctx.volatility_regime == VolatilityRegime::Extreme {
             debug!("Ensemble: EXTREME volatility regime — all strategies paused");
-            return None;
+            for strategy in &self.strategies {
+                votes.push(StrategyVote {
+                    name: strategy.name().to_string(),
+                    fired: false,
+                    side: None,
+                    strength: 0.0,
+                });
+            }
+            return EvalResult { signal: None, votes };
         }
 
-        // Evaluate all strategies
+        // Evaluate all strategies, capturing per-strategy votes
         let mut signals: Vec<(Signal, f64)> = Vec::new();
         for strategy in &self.strategies {
             let weight = self.regime_weight(
@@ -61,15 +92,34 @@ impl EnsembleStrategy {
                 strategy.weight(),
             );
             if weight <= 0.0 {
+                votes.push(StrategyVote {
+                    name: strategy.name().to_string(),
+                    fired: false,
+                    side: None,
+                    strength: 0.0,
+                });
                 continue;
             }
             if let Some(signal) = strategy.evaluate(ctx) {
+                votes.push(StrategyVote {
+                    name: strategy.name().to_string(),
+                    fired: true,
+                    side: Some(signal.side),
+                    strength: signal.strength,
+                });
                 signals.push((signal, weight));
+            } else {
+                votes.push(StrategyVote {
+                    name: strategy.name().to_string(),
+                    fired: false,
+                    side: None,
+                    strength: 0.0,
+                });
             }
         }
 
         if signals.is_empty() {
-            return None;
+            return EvalResult { signal: None, votes };
         }
 
         // Separate into buy and sell buckets
@@ -90,16 +140,21 @@ impl EnsembleStrategy {
             (sell_signals, Side::Sell)
         };
 
-        // Require minimum 2 strategies agreeing (unless only 1 strategy enabled)
+        // Require minimum 2 strategies agreeing — UNLESS a solo signal has
+        // moderate-to-high conviction (>= 0.5 strength). With profit factor
+        // running ~3, the marginal signals add to expected value even if
+        // win rate dips slightly.
         let total_enabled = self.strategies.len();
-        if total_enabled > 1 && chosen_signals.len() < 2 {
-            return None;
+        let solo_high_conviction = chosen_signals.len() == 1
+            && chosen_signals[0].0.strength >= 0.5;
+        if total_enabled > 1 && chosen_signals.len() < 2 && !solo_high_conviction {
+            return EvalResult { signal: None, votes };
         }
 
         // Calculate weighted average strength
         let total_weight: f64 = chosen_signals.iter().map(|(_, w)| w).sum();
         if total_weight <= 0.0 {
-            return None;
+            return EvalResult { signal: None, votes };
         }
         let weighted_strength: f64 = chosen_signals
             .iter()
@@ -113,7 +168,7 @@ impl EnsembleStrategy {
                 "Ensemble: weighted_strength {:.3} below threshold {:.3}",
                 weighted_strength, self.min_strength_threshold
             );
-            return None;
+            return EvalResult { signal: None, votes };
         }
 
         // Use TP/SL from the highest-weight signal that has them
@@ -138,7 +193,7 @@ impl EnsembleStrategy {
             side, ctx.symbol, weighted_strength, chosen_signals.len()
         );
 
-        Some(Signal {
+        let signal = Signal {
             strategy_name: "ensemble".to_string(),
             symbol: ctx.symbol.clone(),
             exchange: ctx.exchange,
@@ -148,7 +203,9 @@ impl EnsembleStrategy {
             take_profit: best_tp.or(best_signal.take_profit),
             stop_loss: best_sl.or(best_signal.stop_loss),
             timestamp_ms: ctx.timestamp_ms,
-        })
+        };
+
+        EvalResult { signal: Some(signal), votes }
     }
 }
 
@@ -187,6 +244,8 @@ mod tests {
             rsi_14: 50.0,
             ema_9: 50000.0,
             ema_21: 50000.0,
+            ema_50: 50000.0,
+            ema_200: 50000.0,
             macd_histogram: 0.0,
             bollinger_upper: 51000.0,
             bollinger_lower: 49000.0,
@@ -208,6 +267,16 @@ mod tests {
             funding_rate_secondary: 0.001,
             open_interest: None,
             price_velocity_30s: 0.0,
+            stoch_k: 50.0,
+            stoch_d: 50.0,
+            stoch_rsi: 50.0,
+            cci_20: 0.0,
+            adx_14: 20.0,
+            psar: 49900.0,
+            psar_long: true,
+            supertrend: 49900.0,
+            supertrend_up: true,
+            donchian: Default::default(),
             timestamp_ms: 1000000,
         }
     }
@@ -239,14 +308,28 @@ mod tests {
     }
 
     #[test]
-    fn no_signal_without_consensus() {
+    fn no_signal_without_consensus_low_strength() {
+        // Low-strength solo signal: should be rejected (needs 2 strategies)
         let strategies: Vec<Box<dyn Strategy>> = vec![
-            Box::new(MockStrategy { name: "a".into(), weight: 0.40, signal: Some(make_signal(Side::Buy, 0.7)) }),
+            Box::new(MockStrategy { name: "a".into(), weight: 0.40, signal: Some(make_signal(Side::Buy, 0.3)) }),
             Box::new(MockStrategy { name: "b".into(), weight: 0.25, signal: None }),
         ];
         let ensemble = EnsembleStrategy::new(strategies, 0.20);
         let signal = ensemble.evaluate(&base_ctx());
-        assert!(signal.is_none()); // only 1 strategy agrees, need 2
+        assert!(signal.is_none());
+    }
+
+    #[test]
+    fn solo_high_conviction_passes() {
+        // Solo signal with strength >= 0.5 should pass even without consensus
+        let strategies: Vec<Box<dyn Strategy>> = vec![
+            Box::new(MockStrategy { name: "a".into(), weight: 0.40, signal: Some(make_signal(Side::Buy, 0.8)) }),
+            Box::new(MockStrategy { name: "b".into(), weight: 0.25, signal: None }),
+        ];
+        let ensemble = EnsembleStrategy::new(strategies, 0.20);
+        let signal = ensemble.evaluate(&base_ctx());
+        assert!(signal.is_some());
+        assert_eq!(signal.unwrap().side, Side::Buy);
     }
 
     #[test]

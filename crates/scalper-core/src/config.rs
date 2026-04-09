@@ -71,6 +71,49 @@ pub struct StrategyConfig {
     pub ob_imbalance: ObImbalanceConfig,
     pub liquidation_wick: LiquidationWickConfig,
     pub funding_bias: FundingBiasConfig,
+    #[serde(default = "default_mean_reversion_config")]
+    pub mean_reversion: MeanReversionConfig,
+    #[serde(default = "default_donchian_config")]
+    pub donchian: DonchianConfig,
+    #[serde(default = "default_ma_cross_config")]
+    pub ma_cross: MaCrossConfig,
+}
+
+fn default_mean_reversion_config() -> MeanReversionConfig {
+    MeanReversionConfig {
+        enabled: false,
+        weight: 0.20,
+        rsi_oversold: 30.0,
+        rsi_overbought: 70.0,
+        bb_penetration: 0.05,
+        atr_tp_multiplier: 1.5,
+        atr_sl_multiplier: 1.0,
+        max_adx: 25.0,
+    }
+}
+
+fn default_donchian_config() -> DonchianConfig {
+    DonchianConfig {
+        enabled: false,
+        weight: 0.30,
+        entry_period: 20,
+        exit_period: 10,
+        atr_tp_multiplier: 4.0,
+        atr_stop_multiplier: 2.0,
+        use_trend_filter: false,
+    }
+}
+
+fn default_ma_cross_config() -> MaCrossConfig {
+    MaCrossConfig {
+        enabled: false,
+        weight: 0.30,
+        fast_period: 21,
+        slow_period: 50,
+        min_spread_pct: 0.005,
+        atr_tp_multiplier: 3.0,
+        atr_stop_multiplier: 1.5,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +155,64 @@ pub struct FundingBiasConfig {
     pub strength_boost: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeanReversionConfig {
+    pub enabled: bool,
+    pub weight: f64,
+    /// RSI threshold below which we consider the market oversold (long entries).
+    pub rsi_oversold: f64,
+    /// RSI threshold above which we consider the market overbought (short entries).
+    pub rsi_overbought: f64,
+    /// How far outside the Bollinger band the price must poke, measured
+    /// as a fraction of the band-width. 0.05 = 5% of the band-width.
+    pub bb_penetration: f64,
+    /// Take-profit distance in ATR multiples from entry.
+    pub atr_tp_multiplier: f64,
+    /// Stop-loss distance in ATR multiples from entry.
+    pub atr_sl_multiplier: f64,
+    /// Skip entries when ADX is above this value (i.e., market is trending).
+    /// Mean reversion works best in ranging markets.
+    pub max_adx: f64,
+}
+
+/// Donchian Channel Breakout config. Classic Turtle Trading setup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DonchianConfig {
+    pub enabled: bool,
+    pub weight: f64,
+    /// Bar lookback for the entry channel. Supported: 10, 20, 55.
+    pub entry_period: u32,
+    /// Bar lookback for the exit channel (should be shorter than entry).
+    /// Supported: 10, 20, 55. Not currently enforced by the strategy — the
+    /// backtest harness uses max_hold_bars as the safety net exit instead.
+    pub exit_period: u32,
+    /// Take-profit distance in ATR multiples (wide for trend following).
+    pub atr_tp_multiplier: f64,
+    /// Stop-loss distance in ATR multiples from entry.
+    pub atr_stop_multiplier: f64,
+    /// If true, only take longs when price > EMA-200 (and shorts when
+    /// price < EMA-200). Filters out counter-trend breakouts.
+    pub use_trend_filter: bool,
+}
+
+/// Moving Average Crossover config. Canonical swing-trading setup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaCrossConfig {
+    pub enabled: bool,
+    pub weight: f64,
+    /// Fast EMA period. Supported values (pre-computed): 9, 21, 50, 200.
+    pub fast_period: u32,
+    /// Slow EMA period. Supported values (pre-computed): 9, 21, 50, 200.
+    pub slow_period: u32,
+    /// Minimum spread between fast and slow as a fraction of price
+    /// (e.g. 0.005 = 0.5%). Filters out weak crosses.
+    pub min_spread_pct: f64,
+    /// Take-profit distance in ATR multiples.
+    pub atr_tp_multiplier: f64,
+    /// Stop-loss distance in ATR multiples.
+    pub atr_stop_multiplier: f64,
+}
+
 impl ScalperConfig {
     /// Load configuration by merging:
     /// 1. config/default.toml (base defaults)
@@ -131,7 +232,44 @@ impl ScalperConfig {
             );
 
         let settings = builder.build()?;
-        let cfg: ScalperConfig = settings.try_deserialize()?;
+        let mut cfg: ScalperConfig = settings.try_deserialize()?;
+
+        // The config crate's Environment source can wipe nested HashMaps like
+        // symbol_map because env vars can only express leaf values. It also
+        // lowercases all keys from merged TOML tables, so symbol_map keys
+        // arrive as "btcusdt" instead of "BTCUSDT". Re-uppercase the keys and
+        // backfill known defaults when the map is empty.
+        let normalize_map = |map: &mut std::collections::HashMap<String, String>| {
+            let entries: Vec<(String, String)> = map
+                .drain()
+                .map(|(k, v)| (k.to_uppercase(), v))
+                .collect();
+            for (k, v) in entries {
+                map.insert(k, v);
+            }
+        };
+        if let Some(ref mut kraken) = cfg.exchanges.kraken {
+            normalize_map(&mut kraken.symbol_map);
+            if kraken.symbol_map.is_empty() {
+                kraken.symbol_map.insert("BTCUSDT".into(), "PI_XBTUSD".into());
+                kraken.symbol_map.insert("ETHUSDT".into(), "PI_ETHUSD".into());
+            }
+        }
+        if let Some(ref mut binance) = cfg.exchanges.binance {
+            normalize_map(&mut binance.symbol_map);
+            if binance.symbol_map.is_empty() {
+                binance.symbol_map.insert("BTCUSDT".into(), "BTCUSDT".into());
+                binance.symbol_map.insert("ETHUSDT".into(), "ETHUSDT".into());
+            }
+        }
+        if let Some(ref mut bybit) = cfg.exchanges.bybit {
+            normalize_map(&mut bybit.symbol_map);
+            if bybit.symbol_map.is_empty() {
+                bybit.symbol_map.insert("BTCUSDT".into(), "BTCUSDT".into());
+                bybit.symbol_map.insert("ETHUSDT".into(), "ETHUSDT".into());
+            }
+        }
+
         Ok(cfg)
     }
 }

@@ -3,7 +3,10 @@ pub mod momentum;
 pub mod ob_imbalance;
 pub mod liquidation_wick;
 pub mod funding_arb;
+pub mod mean_reversion;
+pub mod donchian;
+pub mod ma_cross;
 pub mod ensemble;
 
 pub use traits::{MarketContext, Strategy};
-pub use ensemble::EnsembleStrategy;
+pub use ensemble::{EnsembleStrategy, EvalResult, StrategyVote};

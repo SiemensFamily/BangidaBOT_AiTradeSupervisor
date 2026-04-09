@@ -1,6 +1,20 @@
 use rust_decimal::Decimal;
 use scalper_core::types::{Exchange, Signal, Trend, VolatilityRegime};
 
+/// Rolling Donchian Channel snapshot: highest high and lowest low over
+/// the last N bars, for several common N values. The replay engine and
+/// live bot precompute these so strategies can reference them without
+/// owning their own rolling state.
+#[derive(Debug, Clone, Default)]
+pub struct DonchianSnapshot {
+    pub upper_10: f64,
+    pub lower_10: f64,
+    pub upper_20: f64,
+    pub lower_20: f64,
+    pub upper_55: f64,
+    pub lower_55: f64,
+}
+
 /// Aggregated market data snapshot passed to each strategy for evaluation.
 #[derive(Debug, Clone)]
 pub struct MarketContext {
@@ -21,6 +35,8 @@ pub struct MarketContext {
     pub rsi_14: f64,
     pub ema_9: f64,
     pub ema_21: f64,
+    pub ema_50: f64,
+    pub ema_200: f64,
     pub macd_histogram: f64,
     pub bollinger_upper: f64,
     pub bollinger_lower: f64,
@@ -28,6 +44,20 @@ pub struct MarketContext {
     pub vwap: f64,
     pub atr_14: f64,
     pub obv: f64,
+
+    // Extended indicators
+    pub stoch_k: f64,           // Stochastic %K (0-100)
+    pub stoch_d: f64,           // Stochastic %D (0-100)
+    pub stoch_rsi: f64,         // StochRSI (0-100)
+    pub cci_20: f64,            // Commodity Channel Index (typically -200..+200)
+    pub adx_14: f64,            // Average Directional Index (0-100, >25 = strong trend)
+    pub psar: f64,              // Parabolic SAR price
+    pub psar_long: bool,        // PSAR currently in long mode
+    pub supertrend: f64,        // Supertrend line price
+    pub supertrend_up: bool,    // Supertrend currently bullish
+
+    // Donchian channels (for swing / breakout strategies)
+    pub donchian: DonchianSnapshot,
 
     // Order flow
     pub cvd: f64,

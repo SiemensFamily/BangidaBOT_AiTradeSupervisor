@@ -31,7 +31,8 @@ impl KrakenWsFeed {
         let symbol = msg.product_id.clone()?;
 
         match feed {
-            "book" | "book_snapshot" => {
+            "book_snapshot" => {
+                // Full snapshot: bids and asks arrays
                 let bids: Vec<(Decimal, Decimal)> = msg
                     .bids
                     .as_ref()?
@@ -54,6 +55,24 @@ impl KrakenWsFeed {
                         )
                     })
                     .collect();
+                Some(MarketEvent::OrderBookUpdate {
+                    exchange: Exchange::Kraken,
+                    symbol,
+                    bids,
+                    asks,
+                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                })
+            }
+            "book" => {
+                // Incremental update: single level with side/price/qty
+                let price = Decimal::from_f64_retain(msg.price?).unwrap_or_default();
+                let qty = Decimal::from_f64_retain(msg.qty?).unwrap_or_default();
+                let side = msg.side.as_deref()?;
+                let (bids, asks) = match side {
+                    "buy" => (vec![(price, qty)], vec![]),
+                    "sell" => (vec![], vec![(price, qty)]),
+                    _ => return None,
+                };
                 Some(MarketEvent::OrderBookUpdate {
                     exchange: Exchange::Kraken,
                     symbol,
@@ -137,15 +156,24 @@ impl MarketDataFeed for KrakenWsFeed {
 
                     let mut ping_interval = time::interval(Duration::from_secs(30));
 
+                    let mut msg_count: u64 = 0;
+
                     loop {
                         tokio::select! {
                             msg = read.next() => {
                                 match msg {
                                     Some(Ok(Message::Text(text))) => {
+                                        msg_count += 1;
+                                        // Log first 5 messages for diagnostics
+                                        if msg_count <= 5 {
+                                            info!("Kraken WS msg #{}: {}", msg_count, &text[..text.len().min(300)]);
+                                        }
                                         if let Ok(ws_msg) = serde_json::from_str::<WsMessage>(&text) {
                                             if let Some(event) = Self::parse_message(&ws_msg) {
                                                 let _ = tx.send(event);
                                             }
+                                        } else {
+                                            warn!("Kraken WS: failed to parse: {}", &text[..text.len().min(200)]);
                                         }
                                     }
                                     Some(Ok(Message::Ping(data))) => {

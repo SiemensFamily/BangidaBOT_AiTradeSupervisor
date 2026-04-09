@@ -43,24 +43,24 @@ max_leverage = 20
 
 # Risk management — tuned for $100 starting capital
 [risk]
-max_risk_per_trade_pct = 3.0      # $3 risk per trade on $100
+max_risk_per_trade_pct = 0.50     # Locked in from auto-tuner (was 1.0)
 max_daily_loss_pct = 10.0         # $10 max daily loss
 max_drawdown_pct = 25.0           # 25% peak drawdown limit
-max_consecutive_losses = 3        # 3 losses = 15min cooldown
+max_consecutive_losses = 10       # Locked in from Settings adjustment (was 3)
 cooldown_minutes = 15             # Short recovery for rapid growth
 min_equity = 25.0                 # Hard floor — stop trading at $25
 max_open_positions = 1            # One trade at a time (capital constraint)
-max_trades_per_hour = 15          # Controlled frequency
+max_trades_per_hour = 30          # Was 6 — bot was hitting the cap. Profit factor 3.29 supports scaling up.
 max_leverage = 20                 # Up to 20x
 
 # Strategy configuration
 [strategy]
-ensemble_threshold = 0.20         # Minimum weighted strength to emit signal
+ensemble_threshold = 0.25         # Was 0.40 — let more 2-strategy consensus signals through
 
 [strategy.momentum]
 enabled = true
 weight = 0.40                     # PRIMARY strategy
-volume_spike_multiplier = 2.5
+volume_spike_multiplier = 2.0     # Lowered from 2.5 — momentum can fire on more moves
 take_profit_pct = 0.50            # 0.50% TP
 stop_loss_pct = 0.25              # 0.25% SL (2:1 R:R)
 trailing_stop_pct = 0.20
@@ -70,12 +70,12 @@ rsi_oversold = 20.0
 [strategy.ob_imbalance]
 enabled = true
 weight = 0.25                     # SECONDARY strategy
-imbalance_threshold = 0.30        # Require 30% imbalance
-take_profit_ticks = 3
-stop_loss_ticks = 2
+imbalance_threshold = 0.70        # Locked in from auto-tuner (was 0.35)
+take_profit_ticks = 17            # Locked in from auto-tuner (was 8)
+stop_loss_ticks = 5               # Same — auto-tuner only adjusts TP
 
 [strategy.liquidation_wick]
-enabled = true
+enabled = false                   # DISABLED — Kraken WS doesn't send liquidation events, never fires
 weight = 0.20                     # Reversal strategy
 price_velocity_threshold = 1.0    # 1% move in 30s
 volume_spike_multiplier = 3.0     # 3x avg liquidation volume
@@ -83,7 +83,44 @@ take_profit_pct = 0.80
 stop_loss_pct = 0.40
 
 [strategy.funding_bias]
-enabled = true
+enabled = false                   # DISABLED — funding rate not extracted from Kraken ticker, never fires
 weight = 0.15                     # SUPPLEMENTARY
 funding_threshold = 0.05          # 5% funding rate
 strength_boost = 0.10             # +0.1 signal boost
+
+# Mean Reversion — anti-trend counterpart to momentum. Fires when price pokes
+# outside Bollinger Bands with RSI at an extreme in a ranging (low-ADX) market.
+# ATR-sized exits. Disabled by default; enable via backtest sweep or strategy
+# iteration once validated on held-out data.
+[strategy.mean_reversion]
+enabled = false
+weight = 0.20
+rsi_oversold = 30.0               # RSI below this = oversold (long entries)
+rsi_overbought = 70.0             # RSI above this = overbought (short entries)
+bb_penetration = 0.05             # Must pierce BB by 5% of band-width
+atr_tp_multiplier = 1.5           # TP = entry ± 1.5 × ATR
+atr_sl_multiplier = 1.0           # SL = entry ± 1.0 × ATR
+max_adx = 25.0                    # Skip when ADX > 25 (strong trend)
+
+# Donchian Channel Breakout — classic Turtle Trading. Buy N-day high,
+# sell N-day low. Designed for daily/4h bars with multi-day holds. Disabled
+# by default until backtest validates on held-out data.
+[strategy.donchian]
+enabled = false
+weight = 0.30
+entry_period = 20                 # Supported: 10, 20, 55. 20 = fast Turtle.
+exit_period = 10                  # Supported: 10, 20, 55. Used as safety net.
+atr_tp_multiplier = 4.0           # Wide TP — exit comes from opposite breakout
+atr_stop_multiplier = 2.0         # Initial stop = 2 × ATR from entry
+use_trend_filter = false          # Optional EMA-200 alignment filter
+
+# Moving Average Crossover — canonical trend-following swing setup.
+# Fast EMA crosses above slow EMA = long; crosses below = short.
+[strategy.ma_cross]
+enabled = false
+weight = 0.30
+fast_period = 21                  # Supported: 9, 21, 50, 200
+slow_period = 50                  # Supported: 9, 21, 50, 200
+min_spread_pct = 0.005            # Require 0.5% spread between fast/slow
+atr_tp_multiplier = 3.0
+atr_stop_multiplier = 1.5

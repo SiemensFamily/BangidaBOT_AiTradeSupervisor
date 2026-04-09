@@ -54,6 +54,10 @@ pub struct ManagedOrder {
     pub status: OrderStatus,
     pub created_ms: u64,
     pub updated_ms: u64,
+    /// Optional take-profit price (paper sim uses this to auto-close positions)
+    pub take_profit: Option<Decimal>,
+    /// Optional stop-loss price (paper sim uses this to auto-close positions)
+    pub stop_loss: Option<Decimal>,
 }
 
 /// Concurrent order tracker backed by DashMap for lock-free reads.
@@ -195,6 +199,8 @@ mod tests {
             status: OrderStatus::New,
             created_ms,
             updated_ms: created_ms,
+            take_profit: None,
+            stop_loss: None,
         }
     }
 

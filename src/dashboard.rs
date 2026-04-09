@@ -21,6 +21,10 @@ use scalper_execution::order_tracker::OrderTracker;
 use scalper_risk::risk_manager::RiskManager;
 
 use crate::IndicatorState;
+use crate::auto_tuner::AutoTunerState;
+use crate::learning::LearningState;
+use crate::system_metrics::SystemMetrics;
+use scalper_strategy::StrategyVote;
 
 // ── Trade history ──────────────────────────────────────────────────────────
 
@@ -102,6 +106,12 @@ pub struct DashboardState {
     pub console_log: Arc<Mutex<ConsoleLog>>,
     pub signal_log: Arc<Mutex<VecDeque<SignalRecord>>>,
     pub connected_exchanges: Arc<Mutex<HashSet<String>>>,
+    pub strategy_votes: Arc<Mutex<Vec<StrategyVote>>>,
+    pub auto_tuner_state: Arc<Mutex<AutoTunerState>>,
+    pub learning_state: Arc<Mutex<LearningState>>,
+    pub price_chart_history: Arc<Mutex<HashMap<String, VecDeque<(u64, f64)>>>>,
+    pub equity_history: Arc<Mutex<VecDeque<(u64, f64)>>>,
+    pub system_metrics: Arc<Mutex<SystemMetrics>>,
     pub ws_tx: broadcast::Sender<String>,
 }
 
@@ -126,6 +136,7 @@ struct Snapshot {
     expectancy: f64,
     // Risk
     can_trade: bool,
+    circuit_breaker_enabled: bool,
     consecutive_losses: u32,
     trades_this_hour: u32,
     daily_loss: f64,
@@ -146,6 +157,69 @@ struct Snapshot {
     trade_history: Vec<TradeRecord>,
     // Exchange status
     exchange_status: Vec<ExchangeStatus>,
+    // Strategy status
+    strategy_status: Vec<StrategyStatusSnap>,
+    // Auto-tuner status
+    auto_tuner: AutoTunerSnap,
+    // Learning mode status
+    learning: LearningSnap,
+    // System / HUD metrics
+    system: SystemSnap,
+    // Live equity samples (timestamp_ms, equity)
+    equity_chart: Vec<(u64, f64)>,
+    // Per-symbol price chart series (last ~10 minutes)
+    price_charts: Vec<PriceChartSeries>,
+}
+
+#[derive(Serialize)]
+struct SystemSnap {
+    cpu_percent: f32,
+    memory_mb: f64,
+    virtual_memory_mb: f64,
+    uptime_secs: u64,
+    dashboard_subscribers: usize,
+    market_subscribers: usize,
+    connected_exchanges: usize,
+}
+
+#[derive(Serialize)]
+struct PriceChartSeries {
+    symbol: String,
+    points: Vec<(u64, f64)>,
+}
+
+#[derive(Serialize)]
+struct AutoTunerSnap {
+    last_run_ms: u64,
+    total_runs: u64,
+    total_changes: u64,
+    last_summary: String,
+    last_changes: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct LearningSnap {
+    enabled: bool,
+    generation: u64,
+    population_size: usize,
+    total_ticks: u64,
+    last_evolve_ms: u64,
+    best_fitness: f64,
+    avg_fitness: f64,
+    best_pnl: f64,
+    top_candidates: Vec<LearningCandidateSnap>,
+}
+
+#[derive(Serialize)]
+struct LearningCandidateSnap {
+    id: u32,
+    fitness: f64,
+    net_pnl: f64,
+    wins: u32,
+    losses: u32,
+    win_rate: f64,
+    profit_factor: f64,
+    genome: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -171,6 +245,14 @@ struct MarketSnap {
 struct ExchangeStatus {
     name: String,
     connected: bool,
+}
+
+#[derive(Serialize)]
+struct StrategyStatusSnap {
+    name: String,
+    active: bool,
+    side: String,
+    strength: f64,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -208,6 +290,15 @@ pub async fn start_dashboard(state: DashboardState) {
         .route("/ws", get(ws_handler))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/trades.csv", get(get_trades_csv))
+        .route("/api/signals.csv", get(get_signals_csv))
+        .route("/api/console.csv", get(get_console_csv))
+        .route("/api/auto_tuner_log", get(get_auto_tuner_log))
+        .route("/api/circuit_breaker", axum::routing::post(set_circuit_breaker))
+        .route("/api/learning", get(get_learning))
+        .route("/api/learning/enabled", axum::routing::post(set_learning_enabled))
+        .route("/api/learning/promote", axum::routing::post(promote_best))
+        .route("/api/learning/history", get(get_learning_history))
+        .route("/api/restart", axum::routing::post(restart_bot))
         .route("/api/debug", get(get_debug))
         .with_state(state);
 
@@ -286,6 +377,313 @@ async fn get_trades_csv(State(state): State<DashboardState>) -> impl IntoRespons
     )
 }
 
+async fn get_signals_csv(State(state): State<DashboardState>) -> impl IntoResponse {
+    let signals = state.signal_log.lock().await;
+    let mut csv = String::from("timestamp,symbol,strategy,side,strength,accepted\n");
+    for s in signals.iter() {
+        csv.push_str(&format!(
+            "{},{},{},\"{}\",{:.4},{}\n",
+            s.timestamp_ms, s.symbol, s.strategy, s.side, s.strength, s.accepted
+        ));
+    }
+    (
+        [(header::CONTENT_TYPE, "text/csv"), (header::CONTENT_DISPOSITION, "attachment; filename=\"signals.csv\"")],
+        csv,
+    )
+}
+
+async fn get_console_csv(State(state): State<DashboardState>) -> impl IntoResponse {
+    let log = state.console_log.lock().await;
+    let mut csv = String::from("timestamp,message\n");
+    for e in log.entries() {
+        csv.push_str(&format!(
+            "{},\"{}\"\n",
+            e.timestamp_ms, e.message.replace('"', "\"\"")
+        ));
+    }
+    (
+        [(header::CONTENT_TYPE, "text/csv"), (header::CONTENT_DISPOSITION, "attachment; filename=\"console.csv\"")],
+        csv,
+    )
+}
+
+// ── REST: Circuit breaker toggle ──────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CircuitBreakerRequest {
+    enabled: bool,
+    /// If true, also reset the circuit breaker state (clear consecutive
+    /// losses, cooldowns, daily loss tracking).
+    #[serde(default)]
+    reset: bool,
+}
+
+async fn set_circuit_breaker(
+    State(state): State<DashboardState>,
+    Json(req): Json<CircuitBreakerRequest>,
+) -> impl IntoResponse {
+    let mut rm = state.risk_manager.lock().await;
+    rm.set_circuit_breaker_enabled(req.enabled);
+    if req.reset {
+        rm.reset_circuit_breaker();
+    }
+    let msg = format!(
+        "Circuit breaker {} (reset={})",
+        if req.enabled { "enabled" } else { "disabled" },
+        req.reset
+    );
+    state.console_log.lock().await.push(msg.clone());
+    (axum::http::StatusCode::OK, msg)
+}
+
+// ── REST: Auto-tuner log tail ─────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct AutoTunerLogResponse {
+    lines: Vec<String>,
+}
+
+async fn get_auto_tuner_log() -> Json<AutoTunerLogResponse> {
+    const LOG_PATH: &str = "logs/auto_tuner.log";
+    const MAX_LINES: usize = 200;
+    let lines = match tokio::fs::read_to_string(LOG_PATH).await {
+        Ok(content) => {
+            let all: Vec<&str> = content.lines().collect();
+            let start = all.len().saturating_sub(MAX_LINES);
+            all[start..].iter().map(|s| s.to_string()).collect()
+        }
+        Err(_) => Vec::new(),
+    };
+    Json(AutoTunerLogResponse { lines })
+}
+
+// ── REST: Learning mode ───────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct LearningStateResponse {
+    enabled: bool,
+    generation: u64,
+    population_size: usize,
+    total_ticks: u64,
+    last_evolve_ms: u64,
+    best_fitness: f64,
+    avg_fitness: f64,
+    best_pnl: f64,
+    candidates: Vec<LearningCandidateSnap>,
+}
+
+async fn get_learning(State(state): State<DashboardState>) -> Json<LearningStateResponse> {
+    let ls = state.learning_state.lock().await;
+    let mut sorted: Vec<&scalper_learning::Candidate> = ls.population.candidates.iter().collect();
+    sorted.sort_by(|a, b| b.fitness().partial_cmp(&a.fitness()).unwrap_or(std::cmp::Ordering::Equal));
+    let candidates = sorted
+        .iter()
+        .map(|c| LearningCandidateSnap {
+            id: c.id,
+            fitness: c.fitness(),
+            net_pnl: c.net_pnl,
+            wins: c.wins,
+            losses: c.losses,
+            win_rate: c.win_rate(),
+            profit_factor: c.profit_factor(),
+            genome: serde_json::to_value(&c.genome).unwrap_or(serde_json::Value::Null),
+        })
+        .collect();
+    Json(LearningStateResponse {
+        enabled: ls.enabled,
+        generation: ls.population.generation,
+        population_size: ls.population.candidates.len(),
+        total_ticks: ls.total_ticks,
+        last_evolve_ms: ls.last_evolve_ms,
+        best_fitness: ls.population.best().map(|c| c.fitness()).unwrap_or(0.0),
+        avg_fitness: ls.population.avg_fitness(),
+        best_pnl: ls.population.best().map(|c| c.net_pnl).unwrap_or(0.0),
+        candidates,
+    })
+}
+
+#[derive(Deserialize)]
+struct LearningEnableReq {
+    enabled: bool,
+}
+
+async fn set_learning_enabled(
+    State(state): State<DashboardState>,
+    Json(req): Json<LearningEnableReq>,
+) -> impl IntoResponse {
+    state.learning_state.lock().await.enabled = req.enabled;
+    let msg = format!("Learning mode {}", if req.enabled { "enabled" } else { "disabled" });
+    state.console_log.lock().await.push(msg.clone());
+    (axum::http::StatusCode::OK, msg)
+}
+
+#[derive(Serialize)]
+struct PromoteResponse {
+    ok: bool,
+    message: String,
+    applied: Vec<String>,
+    skipped: Vec<String>,
+    candidate_id: Option<u32>,
+    fitness: f64,
+    net_pnl: f64,
+}
+
+/// Promote the best candidate's genome to the live config.
+///
+/// 5 of the 8 genes map to existing production config fields — those are
+/// written into shared_config and persisted to config/default.toml. The
+/// remaining 3 (adx_min, use_supertrend_filter, max_hold_secs) don't yet
+/// have production strategy hooks and are reported as skipped.
+///
+/// Strategies are built once at startup, so the promoted values take effect
+/// on the next restart — same behavior as the auto-tuner and the Settings
+/// Save button. The dashboard should communicate this to the user.
+async fn promote_best(State(state): State<DashboardState>) -> (axum::http::StatusCode, Json<PromoteResponse>) {
+    // Snapshot the best candidate
+    let (best_id, best_fitness, best_pnl, best_genome) = {
+        let ls = state.learning_state.lock().await;
+        match ls.population.best() {
+            Some(c) => (c.id, c.fitness(), c.net_pnl, c.genome.clone()),
+            None => {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(PromoteResponse {
+                        ok: false,
+                        message: "No candidates in population".to_string(),
+                        applied: vec![],
+                        skipped: vec![],
+                        candidate_id: None,
+                        fitness: 0.0,
+                        net_pnl: 0.0,
+                    }),
+                );
+            }
+        }
+    };
+
+    if best_fitness <= 0.0 {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(PromoteResponse {
+                ok: false,
+                message: "Best candidate has zero fitness — nothing to promote. Let learning run until candidates have completed at least 5 trades.".to_string(),
+                applied: vec![],
+                skipped: vec![],
+                candidate_id: Some(best_id),
+                fitness: best_fitness,
+                net_pnl: best_pnl,
+            }),
+        );
+    }
+
+    // Apply the 5 mapped genes to shared_config
+    let applied = {
+        let mut cfg = state.config.write().await;
+        let mut applied = Vec::new();
+
+        cfg.strategy.ob_imbalance.imbalance_threshold = best_genome.imbalance_threshold;
+        applied.push(format!("ob_imbalance.imbalance_threshold = {:.3}", best_genome.imbalance_threshold));
+
+        cfg.strategy.ob_imbalance.take_profit_ticks = best_genome.take_profit_ticks;
+        applied.push(format!("ob_imbalance.take_profit_ticks = {}", best_genome.take_profit_ticks));
+
+        cfg.strategy.ob_imbalance.stop_loss_ticks = best_genome.stop_loss_ticks;
+        applied.push(format!("ob_imbalance.stop_loss_ticks = {}", best_genome.stop_loss_ticks));
+
+        cfg.strategy.momentum.rsi_oversold = best_genome.rsi_oversold;
+        applied.push(format!("momentum.rsi_oversold = {:.1}", best_genome.rsi_oversold));
+
+        cfg.strategy.momentum.rsi_overbought = best_genome.rsi_overbought;
+        applied.push(format!("momentum.rsi_overbought = {:.1}", best_genome.rsi_overbought));
+
+        applied
+    };
+
+    let skipped = vec![
+        format!("adx_min ({:.1}) — no production strategy uses ADX yet", best_genome.adx_min),
+        format!("use_supertrend_filter ({}) — no production strategy uses Supertrend yet", best_genome.use_supertrend_filter),
+        format!("max_hold_secs ({}) — paper_sim hardcoded, not in config", best_genome.max_hold_secs),
+    ];
+
+    // Persist to disk
+    let persist_result = {
+        let cfg = state.config.read().await;
+        toml::to_string_pretty(&*cfg)
+            .map_err(|e| e.to_string())
+            .and_then(|s| std::fs::write("config/default.toml", s).map_err(|e| e.to_string()))
+    };
+
+    let message = match persist_result {
+        Ok(()) => format!(
+            "Promoted candidate #{} (fitness {:.2}, PnL ${:.2}). {} genes applied to shared config and persisted to config/default.toml. Restart the bot for live strategies to pick up the new values.",
+            best_id, best_fitness, best_pnl, applied.len()
+        ),
+        Err(e) => format!(
+            "Promoted to shared config, but persist failed: {}. Config will revert on restart.",
+            e
+        ),
+    };
+
+    state.console_log.lock().await.push(format!("Learning: {}", message));
+
+    (
+        axum::http::StatusCode::OK,
+        Json(PromoteResponse {
+            ok: true,
+            message,
+            applied,
+            skipped,
+            candidate_id: Some(best_id),
+            fitness: best_fitness,
+            net_pnl: best_pnl,
+        }),
+    )
+}
+
+/// Restart the bot by re-executing the current binary. On Unix this uses
+/// execv so the terminal session stays attached. On failure, exits cleanly
+/// and the user re-runs `cargo run --release` manually.
+///
+/// The endpoint returns 200 immediately, then schedules the exec 300ms later
+/// so the HTTP response reaches the browser before the process swap.
+async fn restart_bot(State(state): State<DashboardState>) -> impl IntoResponse {
+    state
+        .console_log
+        .lock()
+        .await
+        .push("Restart requested via dashboard — re-executing in 300ms".to_string());
+
+    tokio::spawn(async {
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            if let Ok(exe) = std::env::current_exe() {
+                let args: Vec<String> = std::env::args().skip(1).collect();
+                let err = std::process::Command::new(exe).args(&args).exec();
+                tracing::error!("restart exec failed: {}", err);
+            }
+        }
+        std::process::exit(0);
+    });
+
+    (axum::http::StatusCode::OK, "Restarting in 300ms")
+}
+
+#[derive(Serialize)]
+struct LearningHistoryResponse {
+    points: Vec<(i64, f64)>,
+}
+
+async fn get_learning_history() -> Json<LearningHistoryResponse> {
+    // Open the DB read-only on demand. Returns empty if the file doesn't exist.
+    let points = match scalper_learning::database::LearningDb::open(crate::learning::DB_PATH) {
+        Ok(db) => db.fitness_history(200).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    Json(LearningHistoryResponse { points })
+}
+
 // ── REST: Debug ───────────────────────────────────────────────────────────
 
 async fn get_debug(State(state): State<DashboardState>) -> Json<Snapshot> {
@@ -314,7 +712,8 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
     let total_trades = tracker.total_trades();
     let expectancy = sanitize_f64(tracker.expectancy());
 
-    let can_trade = cb.can_trade(now_ms);
+    let cb_enabled = rm.circuit_breaker_enabled();
+    let can_trade = !cb_enabled || cb.can_trade(now_ms);
     let consecutive_losses = cb.consecutive_losses();
     let trades_this_hour = cb.trades_this_hour();
     let daily_loss = sanitize_f64(cb.daily_loss());
@@ -395,6 +794,92 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
         .collect();
     drop(connected);
 
+    // Strategy status
+    let votes = state.strategy_votes.lock().await;
+    let strategy_status: Vec<StrategyStatusSnap> = votes
+        .iter()
+        .map(|v| StrategyStatusSnap {
+            name: v.name.clone(),
+            active: v.fired,
+            side: v.side.map(|s| format!("{:?}", s)).unwrap_or_default(),
+            strength: v.strength,
+        })
+        .collect();
+    drop(votes);
+
+    // Auto-tuner status
+    let at = state.auto_tuner_state.lock().await;
+    let auto_tuner = AutoTunerSnap {
+        last_run_ms: at.last_run_ms,
+        total_runs: at.total_runs,
+        total_changes: at.total_changes,
+        last_summary: at.last_summary.clone(),
+        last_changes: at.last_changes.clone(),
+    };
+    drop(at);
+
+    // Learning state
+    let ls = state.learning_state.lock().await;
+    let mut sorted: Vec<&scalper_learning::Candidate> = ls.population.candidates.iter().collect();
+    sorted.sort_by(|a, b| b.fitness().partial_cmp(&a.fitness()).unwrap_or(std::cmp::Ordering::Equal));
+    let top_candidates: Vec<LearningCandidateSnap> = sorted
+        .iter()
+        .take(5)
+        .map(|c| LearningCandidateSnap {
+            id: c.id,
+            fitness: c.fitness(),
+            net_pnl: c.net_pnl,
+            wins: c.wins,
+            losses: c.losses,
+            win_rate: c.win_rate(),
+            profit_factor: c.profit_factor(),
+            genome: serde_json::to_value(&c.genome).unwrap_or(serde_json::Value::Null),
+        })
+        .collect();
+    let learning = LearningSnap {
+        enabled: ls.enabled,
+        generation: ls.population.generation,
+        population_size: ls.population.candidates.len(),
+        total_ticks: ls.total_ticks,
+        last_evolve_ms: ls.last_evolve_ms,
+        best_fitness: ls.population.best().map(|c| c.fitness()).unwrap_or(0.0),
+        avg_fitness: ls.population.avg_fitness(),
+        best_pnl: ls.population.best().map(|c| c.net_pnl).unwrap_or(0.0),
+        top_candidates,
+    };
+    drop(ls);
+
+    // System metrics snapshot
+    let sm = state.system_metrics.lock().await;
+    let connected_count = state.connected_exchanges.lock().await.len();
+    let system = SystemSnap {
+        cpu_percent: sm.cpu_percent,
+        memory_mb: sm.memory_mb,
+        virtual_memory_mb: sm.virtual_memory_mb,
+        uptime_secs: sm.uptime_secs,
+        dashboard_subscribers: sm.dashboard_subscribers,
+        market_subscribers: sm.market_subscribers,
+        connected_exchanges: connected_count,
+    };
+    drop(sm);
+
+    // Equity chart series (clone trimmed)
+    let equity_chart: Vec<(u64, f64)> = {
+        let h = state.equity_history.lock().await;
+        h.iter().copied().collect()
+    };
+
+    // Price chart series per symbol
+    let price_charts: Vec<PriceChartSeries> = {
+        let ph = state.price_chart_history.lock().await;
+        ph.iter()
+            .map(|(sym, buf)| PriceChartSeries {
+                symbol: sym.clone(),
+                points: buf.iter().copied().collect(),
+            })
+            .collect()
+    };
+
     Snapshot {
         timestamp_ms: now_ms,
         mode: state.config_mode.clone(),
@@ -410,6 +895,7 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
         total_trades,
         expectancy,
         can_trade,
+        circuit_breaker_enabled: cb_enabled,
         consecutive_losses,
         trades_this_hour,
         daily_loss,
@@ -426,5 +912,11 @@ async fn build_snapshot(state: &DashboardState) -> Snapshot {
         signal_log,
         trade_history,
         exchange_status,
+        strategy_status,
+        auto_tuner,
+        learning,
+        system,
+        equity_chart,
+        price_charts,
     }
 }
