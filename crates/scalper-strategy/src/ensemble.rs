@@ -29,15 +29,17 @@ pub struct EvalResult {
 pub struct EnsembleStrategy {
     strategies: Vec<Box<dyn Strategy>>,
     min_strength_threshold: f64,
+    performance_tracker: scalper_risk::PerformanceTracker,   // ← Add this line
 }
 
 impl EnsembleStrategy {
-    pub fn new(strategies: Vec<Box<dyn Strategy>>, min_strength_threshold: f64) -> Self {
-        Self {
-            strategies,
-            min_strength_threshold,
-        }
+pub fn new(strategies: Vec<Box<dyn Strategy>>, min_strength_threshold: f64) -> Self {
+    Self {
+        strategies,
+        min_strength_threshold,
+        performance_tracker: scalper_risk::PerformanceTracker::default(),   // ← Add this
     }
+}
 
     /// Adjust strategy weight based on current volatility regime.
     fn regime_weight(&self, strategy_name: &str, regime: VolatilityRegime, base_weight: f64) -> f64 {
@@ -62,7 +64,106 @@ impl EnsembleStrategy {
     }
 
     pub fn evaluate(&self, ctx: &MarketContext) -> Option<Signal> {
-        self.evaluate_detailed(ctx).signal
+        if ctx.volatility_regime == VolatilityRegime::Extreme {
+            debug!("Ensemble: EXTREME volatility regime — all strategies paused");
+            return None;
+        }
+
+        // Evaluate all strategies
+        let mut signals: Vec<(Signal, f64)> = Vec::new();
+        for strategy in &self.strategies {
+            let weight = self.regime_weight(
+                strategy.name(),
+                ctx.volatility_regime,
+                strategy.weight(),
+            );
+            if weight <= 0.0 {
+                continue;
+            }
+            if let Some(signal) = strategy.evaluate(ctx) {
+                signals.push((signal, weight));
+            }
+        }
+
+        if signals.is_empty() {
+            return None;
+        }
+
+        // Separate into buy and sell buckets
+        let mut buy_signals: Vec<&(Signal, f64)> = Vec::new();
+        let mut sell_signals: Vec<&(Signal, f64)> = Vec::new();
+
+        for entry in &signals {
+            match entry.0.side {
+                Side::Buy => buy_signals.push(entry),
+                Side::Sell => sell_signals.push(entry),
+            }
+        }
+
+        let (chosen_signals, side) = if buy_signals.len() >= sell_signals.len() {
+            (buy_signals, Side::Buy)
+        } else {
+            (sell_signals, Side::Sell)
+        };
+
+        // === UPDATED FOR 15s SCALPING + $100 PROTECTION ===
+        let total_enabled = self.strategies.len();
+        if total_enabled > 1 && chosen_signals.len() < 3 {   // Require 3 agreeing strategies
+            debug!("Ensemble: insufficient agreement on 15s ({} < 3)", chosen_signals.len());
+            return None;
+        }
+
+        let total_weight: f64 = chosen_signals.iter().map(|(_, w)| *w).sum();
+        if total_weight <= 0.0 {
+            return None;
+        }
+
+        let weighted_strength: f64 = chosen_signals
+            .iter()
+            .map(|(s, w)| s.strength * *w)
+            .sum::<f64>()
+            / total_weight;
+
+        // Use the stricter threshold from config (0.48)
+        if weighted_strength < 0.48 {
+            debug!(
+                "Ensemble: weighted_strength {:.3} below 15s threshold 0.48",
+                weighted_strength
+            );
+            return None;
+        }
+
+        // Use TP/SL from the highest-weight signal
+        let mut best_tp = None;
+        let mut best_sl = None;
+        let mut best_weight = 0.0_f64;
+
+        for (signal, weight) in &chosen_signals {
+            if *weight > best_weight && signal.take_profit.is_some() {
+                best_tp = signal.take_profit;
+                best_sl = signal.stop_loss;
+                best_weight = *weight;
+            }
+        }
+
+        let best_signal = &chosen_signals[0].0;
+
+        debug!(
+            "Ensemble APPROVED: {:?} {} strength={:.3} ({} strategies agree)",
+            side, ctx.symbol, weighted_strength, chosen_signals.len()
+        );
+
+        Some(Signal {
+            strategy_name: "ensemble".to_string(),
+            symbol: ctx.symbol.clone(),
+            exchange: ctx.exchange,
+            side,
+            strength: weighted_strength,
+            confidence: weighted_strength * 0.85,
+            take_profit: best_tp.or(best_signal.take_profit),
+            stop_loss: best_sl.or(best_signal.stop_loss),
+            timestamp_ms: ctx.timestamp_ms,
+        })
     }
 
     /// Evaluate all strategies and return both the ensemble signal and

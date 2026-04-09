@@ -13,3 +13,14 @@ testnet = true
 base_url_rest = "https://api-testnet.bybit.com"
 base_url_ws = ""
 testnet = true
+
+[account]
+initial_capital = 100.0
+
+[risk]
+max_risk_per_trade_pct = 0.4      # Lowered a bit more
+daily_loss_limit_pct = 1.5        # Tighter daily protection
+
+[strategy]
+min_confluence_score = 0.40
+min_agreeing_strategies = 2

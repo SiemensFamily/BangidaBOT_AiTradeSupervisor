@@ -8,6 +8,10 @@ base_url_rest = "https://testnet.binancefuture.com"
 base_url_ws = ""
 testnet = true
 
+[exchanges.binance.symbol_map]
+BTCUSDT = "BTCUSDT"
+ETHUSDT = "ETHUSDT"
+
 [exchanges.bybit]
 api_key = ""
 api_secret = ""
@@ -15,7 +19,10 @@ base_url_rest = "https://api-testnet.bybit.com"
 base_url_ws = ""
 testnet = true
 
-# OKX — best for $100 accounts ($1 minimum order, -0.025% maker rebate)
+[exchanges.bybit.symbol_map]
+ETHUSDT = "ETHUSDT"
+BTCUSDT = "BTCUSDT"
+
 [exchanges.okx]
 api_key = ""
 api_secret = ""
@@ -24,7 +31,6 @@ base_url_rest = "https://www.okx.com"
 base_url_ws = ""
 testnet = false
 
-# Kraken Futures
 [exchanges.kraken]
 api_key = ""
 api_secret = ""
@@ -33,94 +39,86 @@ base_url_ws = "wss://futures.kraken.com/ws/v1"
 testnet = false
 
 [exchanges.kraken.symbol_map]
-BTCUSDT = "PI_XBTUSD"
 ETHUSDT = "PI_ETHUSD"
+BTCUSDT = "PI_XBTUSD"
 
 [trading]
-symbols = ["BTCUSDT", "ETHUSDT"]
+symbols = [
+    "BTCUSDT",
+    "ETHUSDT",
+]
 default_leverage = 10
 max_leverage = 20
 
-# Risk management — tuned for $100 starting capital
 [risk]
-max_risk_per_trade_pct = 0.50     # Locked in from auto-tuner (was 1.0)
-max_daily_loss_pct = 10.0         # $10 max daily loss
-max_drawdown_pct = 25.0           # 25% peak drawdown limit
-max_consecutive_losses = 10       # Locked in from Settings adjustment (was 3)
-cooldown_minutes = 15             # Short recovery for rapid growth
-min_equity = 25.0                 # Hard floor — stop trading at $25
-max_open_positions = 1            # One trade at a time (capital constraint)
-max_trades_per_hour = 30          # Was 6 — bot was hitting the cap. Profit factor 3.29 supports scaling up.
-max_leverage = 20                 # Up to 20x
+max_risk_per_trade_pct = 2.0
+max_daily_loss_pct = 10.0
+max_drawdown_pct = 25.0
+max_consecutive_losses = 10
+cooldown_minutes = 15
+min_equity = 25.0
+max_open_positions = 1
+max_trades_per_hour = 30
+max_leverage = 20
 
-# Strategy configuration
 [strategy]
-ensemble_threshold = 0.25         # Was 0.40 — let more 2-strategy consensus signals through
+ensemble_threshold = 0.25
 
 [strategy.momentum]
 enabled = true
-weight = 0.40                     # PRIMARY strategy
-volume_spike_multiplier = 2.0     # Lowered from 2.5 — momentum can fire on more moves
-take_profit_pct = 0.50            # 0.50% TP
-stop_loss_pct = 0.25              # 0.25% SL (2:1 R:R)
-trailing_stop_pct = 0.20
+weight = 0.4
+volume_spike_multiplier = 2.0
+take_profit_pct = 0.5
+stop_loss_pct = 0.25
+trailing_stop_pct = 0.2
 rsi_overbought = 80.0
 rsi_oversold = 20.0
 
 [strategy.ob_imbalance]
 enabled = true
-weight = 0.25                     # SECONDARY strategy
-imbalance_threshold = 0.70        # Locked in from auto-tuner (was 0.35)
-take_profit_ticks = 17            # Locked in from auto-tuner (was 8)
-stop_loss_ticks = 5               # Same — auto-tuner only adjusts TP
+weight = 0.25
+imbalance_threshold = 0.7
+take_profit_ticks = 17
+stop_loss_ticks = 3
 
 [strategy.liquidation_wick]
-enabled = false                   # DISABLED — Kraken WS doesn't send liquidation events, never fires
-weight = 0.20                     # Reversal strategy
-price_velocity_threshold = 1.0    # 1% move in 30s
-volume_spike_multiplier = 3.0     # 3x avg liquidation volume
-take_profit_pct = 0.80
-stop_loss_pct = 0.40
+enabled = false
+weight = 0.2
+price_velocity_threshold = 1.0
+volume_spike_multiplier = 3.0
+take_profit_pct = 0.8
+stop_loss_pct = 0.4
 
 [strategy.funding_bias]
-enabled = false                   # DISABLED — funding rate not extracted from Kraken ticker, never fires
-weight = 0.15                     # SUPPLEMENTARY
-funding_threshold = 0.05          # 5% funding rate
-strength_boost = 0.10             # +0.1 signal boost
+enabled = false
+weight = 0.15
+funding_threshold = 0.05
+strength_boost = 0.1
 
-# Mean Reversion — anti-trend counterpart to momentum. Fires when price pokes
-# outside Bollinger Bands with RSI at an extreme in a ranging (low-ADX) market.
-# ATR-sized exits. Disabled by default; enable via backtest sweep or strategy
-# iteration once validated on held-out data.
 [strategy.mean_reversion]
 enabled = false
-weight = 0.20
-rsi_oversold = 30.0               # RSI below this = oversold (long entries)
-rsi_overbought = 70.0             # RSI above this = overbought (short entries)
-bb_penetration = 0.05             # Must pierce BB by 5% of band-width
-atr_tp_multiplier = 1.5           # TP = entry ± 1.5 × ATR
-atr_sl_multiplier = 1.0           # SL = entry ± 1.0 × ATR
-max_adx = 25.0                    # Skip when ADX > 25 (strong trend)
+weight = 0.2
+rsi_oversold = 30.0
+rsi_overbought = 70.0
+bb_penetration = 0.05
+atr_tp_multiplier = 1.5
+atr_sl_multiplier = 1.0
+max_adx = 25.0
 
-# Donchian Channel Breakout — classic Turtle Trading. Buy N-day high,
-# sell N-day low. Designed for daily/4h bars with multi-day holds. Disabled
-# by default until backtest validates on held-out data.
 [strategy.donchian]
 enabled = false
-weight = 0.30
-entry_period = 20                 # Supported: 10, 20, 55. 20 = fast Turtle.
-exit_period = 10                  # Supported: 10, 20, 55. Used as safety net.
-atr_tp_multiplier = 4.0           # Wide TP — exit comes from opposite breakout
-atr_stop_multiplier = 2.0         # Initial stop = 2 × ATR from entry
-use_trend_filter = false          # Optional EMA-200 alignment filter
+weight = 0.3
+entry_period = 20
+exit_period = 10
+atr_tp_multiplier = 4.0
+atr_stop_multiplier = 2.0
+use_trend_filter = false
 
-# Moving Average Crossover — canonical trend-following swing setup.
-# Fast EMA crosses above slow EMA = long; crosses below = short.
 [strategy.ma_cross]
 enabled = false
-weight = 0.30
-fast_period = 21                  # Supported: 9, 21, 50, 200
-slow_period = 50                  # Supported: 9, 21, 50, 200
-min_spread_pct = 0.005            # Require 0.5% spread between fast/slow
+weight = 0.3
+fast_period = 21
+slow_period = 50
+min_spread_pct = 0.005
 atr_tp_multiplier = 3.0
 atr_stop_multiplier = 1.5
