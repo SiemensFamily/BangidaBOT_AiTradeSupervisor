@@ -99,6 +99,12 @@ impl RiskManager {
             }
         };
 
+        let risk_amount = equity * risk_pct / 100.0;
+        info!(
+            "Risk calc: equity={:.2}, risk_pct={:.2}%, risk_amount={:.4}, price={:.2}, atr={:?}, stop_dist={:.3}%, qty={:.6}",
+            equity, risk_pct, risk_amount, price, atr, stop_distance_pct, quantity
+        );
+
         // 5. Regime-based risk adjustment
         match regime {
             VolatilityRegime::Volatile => {
@@ -111,6 +117,20 @@ impl RiskManager {
             }
             VolatilityRegime::Normal => {}
             VolatilityRegime::Extreme => unreachable!(), // handled above
+        }
+
+        // 5b. Minimum position floor — prevent zero-size positions on small capital
+        // Takes max of (a) $25 notional equivalent (b) 0.001 absolute qty floor
+        const MIN_NOTIONAL_USD: f64 = 25.0;
+        const MIN_QUANTITY_ABS: f64 = 0.001;
+        if price > 0.0 {
+            let min_qty_notional = MIN_NOTIONAL_USD / price;
+            let min_qty = min_qty_notional.max(MIN_QUANTITY_ABS);
+            if quantity < min_qty {
+                info!("Risk manager: qty {:.6} below floor, bumping to {:.6} (notional=${:.2}, abs_floor={})",
+                      quantity, min_qty, min_qty * price, MIN_QUANTITY_ABS);
+                quantity = min_qty;
+            }
         }
 
         // 6. Enforce max leverage from config
@@ -186,6 +206,8 @@ mod tests {
 
     fn test_config() -> RiskConfig {
         RiskConfig {
+            max_risk_per_trade: 0.0,
+            daily_drawdown_limit: 0.0,
             max_risk_per_trade_pct: 1.0,
             max_daily_loss_pct: 5.0,
             max_drawdown_pct: 10.0,

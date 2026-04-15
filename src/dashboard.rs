@@ -70,6 +70,9 @@ impl ConsoleLog {
             self.entries.pop_front();
         }
         self.entries.push_back(entry);
+        if self.entries.len() > 5000 {  // increase from whatever it is now (probably 500-1000)
+    // write to file
+}
     }
 
     pub fn entries(&self) -> Vec<ConsoleEntry> {

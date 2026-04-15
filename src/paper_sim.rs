@@ -1,19 +1,20 @@
 //! Paper trade fill simulator.
-//!
-//! Periodically checks open orders against live market data and simulates fills.
-//! Tracks open positions per symbol so that an opposing-side fill realizes PnL.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use rust_decimal::prelude::*;
-use scalper_core::types::{OrderType, Side};
+use scalper_core::types::Side;
 use scalper_data::orderbook::OrderBook;
 use scalper_execution::order_tracker::OrderTracker;
 use scalper_risk::risk_manager::RiskManager;
+use scalper_risk::AiTradeSupervisor;
+
+use tracing::info;
 
 use crate::dashboard::{ConsoleLog, TradeRecord};
+use crate::file_logger::OptionalLogger;
 
 const SLIPPAGE_BPS: f64 = 2.0;
 const TAKER_FEE_BPS: f64 = 4.0;
@@ -35,16 +36,18 @@ pub async fn run_paper_sim(
     risk_manager: Arc<Mutex<RiskManager>>,
     trade_history: Arc<Mutex<Vec<TradeRecord>>>,
     console_log: Arc<Mutex<ConsoleLog>>,
+    supervisor: Arc<Mutex<AiTradeSupervisor>>,
+    trade_logger: Arc<OptionalLogger>,
 ) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
     let mut positions: HashMap<String, OpenPosition> = HashMap::new();
     let mut cooldowns: HashMap<String, u64> = HashMap::new();
-    const COOLDOWN_MS: u64 = 20_000; // 20s after a close
+    const COOLDOWN_MS: u64 = 20_000;
 
     loop {
         interval.tick().await;
 
-        // ── Auto-close open positions when price crosses TP or SL ───────
+        // Auto-close on TP / SL / TIME
         if !positions.is_empty() {
             let obs = orderbooks.lock().await;
             let mut to_close: Vec<(String, Decimal, &'static str)> = Vec::new();
@@ -89,13 +92,14 @@ pub async fn run_paper_sim(
                     .timestamp_millis()
                     .saturating_sub(pos.opened_ms as i64)
                     .max(0) as u64;
+
                 if age_ms >= MAX_HOLD_MS {
                     to_close.push((sym.clone(), exit_px, "TIME"));
                 }
             }
             drop(obs);
 
-            // Realize closures
+            // Process auto-closes
             for (sym, exit_px, reason) in to_close {
                 if let Some(pos) = positions.remove(&sym) {
                     let pnl_dec = match pos.side {
@@ -103,19 +107,21 @@ pub async fn run_paper_sim(
                         Side::Sell => (pos.avg_price - exit_px) * pos.quantity,
                     };
                     let pnl_f64 = pnl_dec.to_f64().unwrap_or(0.0);
-                    let fees_dec = exit_px * pos.quantity
-                        * Decimal::from_f64(TAKER_FEE_BPS / 10_000.0).unwrap_or(Decimal::ZERO);
-                    let fees_f64 = fees_dec.to_f64().unwrap_or(0.0);
+                    let fees_f64 = (exit_px * pos.quantity 
+                        * Decimal::from_f64(TAKER_FEE_BPS / 10_000.0).unwrap_or(Decimal::ZERO))
+                        .to_f64().unwrap_or(0.0);
                     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
 
-                    // === LEARNING LINE ADDED HERE ===
-                    // Record whether the trade was profitable for the PerformanceTracker
+                    // Record to supervisor
                     {
-                        let mut rm = risk_manager.lock().await;
-                        rm.on_trade_result(pnl_f64, fees_f64, now_ms);
-                        // If RiskManager exposes the tracker, call it here.
-                        // For now we record in RiskManager (we'll improve this next).
+                        let mut sup = supervisor.lock().await;
+                        sup.record_trade(&sym, pnl_f64, fees_f64);
+                        info!("SUPERVISOR RECORDED: {} | PnL=${:.4} | Fees=${:.4} | Reason={}", 
+                              sym, pnl_f64, fees_f64, reason);
                     }
+
+                    let mut rm = risk_manager.lock().await;
+                    rm.on_trade_result(pnl_f64, fees_f64, now_ms);
 
                     cooldowns.insert(sym.clone(), now_ms + COOLDOWN_MS);
 
@@ -124,7 +130,7 @@ pub async fn run_paper_sim(
                         Side::Sell => Side::Buy,
                     };
 
-                    trade_history.lock().await.push(TradeRecord {
+                    let record = TradeRecord {
                         timestamp_ms: now_ms,
                         symbol: sym.clone(),
                         side: format!("{:?}", exit_side),
@@ -133,7 +139,9 @@ pub async fn run_paper_sim(
                         pnl: pnl_f64,
                         fees: fees_f64,
                         order_id: format!("close-{}-{}", reason, now_ms),
-                    });
+                    };
+                    trade_logger.log(&record);
+                    trade_history.lock().await.push(record);
 
                     console_log.lock().await.push(format!(
                         "Auto-close [{}]: {} {:.6} {} @ {} → PnL ${:.4}",
@@ -148,7 +156,7 @@ pub async fn run_paper_sim(
             }
         }
 
-        // ... (the rest of your file remains exactly the same)
+        // Fill open orders (including opposing fills that close positions)
         let open_orders = order_tracker.open_orders();
         if open_orders.is_empty() {
             continue;
@@ -193,109 +201,94 @@ pub async fn run_paper_sim(
                 }
             }
 
-            let fill_result = match order.order_type {
-                OrderType::Market | OrderType::Limit => {
-                    let slippage_mult = Decimal::from_f64(SLIPPAGE_BPS / 10_000.0).unwrap_or(Decimal::ZERO);
-                    let fill_price = match order.side {
-                        Side::Buy => best_ask * (Decimal::ONE + slippage_mult),
-                        Side::Sell => best_bid * (Decimal::ONE - slippage_mult),
+            // Simplified fill logic
+            let slippage_mult = Decimal::from_f64(SLIPPAGE_BPS / 10_000.0).unwrap_or(Decimal::ZERO);
+            let fill_price = match order.side {
+                Side::Buy => best_ask * (Decimal::ONE + slippage_mult),
+                Side::Sell => best_bid * (Decimal::ONE - slippage_mult),
+            };
+            let fee_rate = Decimal::from_f64(TAKER_FEE_BPS / 10_000.0).unwrap_or(Decimal::ZERO);
+
+            let qty = order.quantity;
+            let notional = fill_price * qty;
+            let fees = notional * fee_rate;
+            let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+            let fees_f64 = fees.to_f64().unwrap_or(0.0);
+
+            let pnl = match positions.get_mut(&order.symbol) {
+                Some(pos) if pos.side != order.side => {
+                    let close_qty = qty.min(pos.quantity);
+                    let pnl_dec = match pos.side {
+                        Side::Buy => (fill_price - pos.avg_price) * close_qty,
+                        Side::Sell => (pos.avg_price - fill_price) * close_qty,
                     };
-                    let fee_rate = Decimal::from_f64(TAKER_FEE_BPS / 10_000.0).unwrap_or(Decimal::ZERO);
-                    Some((fill_price, fee_rate))
-                }
-                OrderType::StopMarket | OrderType::TakeProfitMarket => {
-                    let triggered = match order.side {
-                        Side::Buy => best_ask >= order.price,
-                        Side::Sell => best_bid <= order.price,
-                    };
-                    if triggered {
-                        let slippage_mult = Decimal::from_f64(SLIPPAGE_BPS / 10_000.0).unwrap_or(Decimal::ZERO);
-                        let fill_price = match order.side {
-                            Side::Buy => best_ask * (Decimal::ONE + slippage_mult),
-                            Side::Sell => best_bid * (Decimal::ONE - slippage_mult),
-                        };
-                        let fee_rate = Decimal::from_f64(TAKER_FEE_BPS / 10_000.0).unwrap_or(Decimal::ZERO);
-                        Some((fill_price, fee_rate))
-                    } else {
-                        None
+                    pos.quantity -= close_qty;
+                    let pnl_f64 = pnl_dec.to_f64().unwrap_or(0.0);
+
+                    // Record to supervisor on every close (partial or full)
+                    {
+                        let mut sup = supervisor.lock().await;
+                        sup.record_trade(&order.symbol, pnl_f64, fees_f64);
+                        info!("SUPERVISOR RECORDED: {} | PnL=${:.4} | Fees=${:.4} | Reason=OPPOSING_FILL{}",
+                              order.symbol, pnl_f64, fees_f64,
+                              if pos.quantity <= Decimal::ZERO { "" } else { " (partial)" });
                     }
+
+                    if pos.quantity <= Decimal::ZERO {
+                        positions.remove(&order.symbol);
+                        cooldowns.insert(order.symbol.clone(), now_ms + COOLDOWN_MS);
+                    }
+                    pnl_f64
+                }
+                Some(pos) => {
+                    let total_qty = pos.quantity + qty;
+                    if total_qty > Decimal::ZERO {
+                        pos.avg_price = (pos.avg_price * pos.quantity + fill_price * qty) / total_qty;
+                        pos.quantity = total_qty;
+                    }
+                    if order.take_profit.is_some() { pos.take_profit = order.take_profit; }
+                    if order.stop_loss.is_some() { pos.stop_loss = order.stop_loss; }
+                    0.0
+                }
+                None => {
+                    positions.insert(order.symbol.clone(), OpenPosition {
+                        side: order.side,
+                        avg_price: fill_price,
+                        quantity: qty,
+                        take_profit: order.take_profit,
+                        stop_loss: order.stop_loss,
+                        opened_ms: now_ms,
+                    });
+                    0.0
                 }
             };
 
-            if let Some((fill_price, fee_rate)) = fill_result {
-                let qty = order.quantity;
-                let notional = fill_price * qty;
-                let fees = notional * fee_rate;
-                let now_ms = chrono::Utc::now().timestamp_millis() as u64;
-                let fees_f64 = fees.to_f64().unwrap_or(0.0);
+            order_tracker.update(&order.order_id, qty, fill_price, "Filled", now_ms);
 
-                let pnl = match positions.get_mut(&order.symbol) {
-                    Some(pos) if pos.side != order.side => {
-                        let close_qty = qty.min(pos.quantity);
-                        let pnl_dec = match pos.side {
-                            Side::Buy => (fill_price - pos.avg_price) * close_qty,
-                            Side::Sell => (pos.avg_price - fill_price) * close_qty,
-                        };
-                        pos.quantity -= close_qty;
-                        let pnl_f64 = pnl_dec.to_f64().unwrap_or(0.0);
-                        if pos.quantity <= Decimal::ZERO {
-                            positions.remove(&order.symbol);
-                            cooldowns.insert(order.symbol.clone(), now_ms + COOLDOWN_MS);
-                        }
-                        pnl_f64
-                    }
-                    Some(pos) => {
-                        let total_qty = pos.quantity + qty;
-                        if total_qty > Decimal::ZERO {
-                            pos.avg_price = (pos.avg_price * pos.quantity + fill_price * qty) / total_qty;
-                            pos.quantity = total_qty;
-                        }
-                        if order.take_profit.is_some() { pos.take_profit = order.take_profit; }
-                        if order.stop_loss.is_some() { pos.stop_loss = order.stop_loss; }
-                        0.0
-                    }
-                    None => {
-                        positions.insert(order.symbol.clone(), OpenPosition {
-                            side: order.side,
-                            avg_price: fill_price,
-                            quantity: qty,
-                            take_profit: order.take_profit,
-                            stop_loss: order.stop_loss,
-                            opened_ms: now_ms,
-                        });
-                        0.0
-                    }
-                };
+            let mut rm = risk_manager.lock().await;
+            rm.on_trade_result(pnl, fees_f64, now_ms);
 
-                order_tracker.update(&order.order_id, qty, fill_price, "Filled", now_ms);
+            let record = TradeRecord {
+                timestamp_ms: now_ms,
+                symbol: order.symbol.clone(),
+                side: format!("{:?}", order.side),
+                price: fill_price.to_string(),
+                quantity: qty.to_string(),
+                pnl,
+                fees: fees_f64,
+                order_id: order.order_id.clone(),
+            };
+            trade_logger.log(&record);
+            trade_history.lock().await.push(record);
 
-                // Record in risk manager
-                {
-                    let mut rm = risk_manager.lock().await;
-                    rm.on_trade_result(pnl, fees_f64, now_ms);
-                }
-
-                let record = TradeRecord {
-                    timestamp_ms: now_ms,
-                    symbol: order.symbol.clone(),
-                    side: format!("{:?}", order.side),
-                    price: fill_price.to_string(),
-                    quantity: qty.to_string(),
-                    pnl,
-                    fees: fees_f64,
-                    order_id: order.order_id.clone(),
-                };
-                trade_history.lock().await.push(record);
-
-                console_log.lock().await.push(format!(
-                    "Paper fill: {} {} {} @ {} (fees: ${:.4})",
-                    format!("{:?}", order.side),
-                    qty,
-                    order.symbol,
-                    fill_price.round_dp(2),
-                    fees_f64,
-                ));
-            }
+            console_log.lock().await.push(format!(
+                "Paper fill: {} {} {} @ {} (fees: ${:.4})",
+                format!("{:?}", order.side),
+                qty,
+                order.symbol,
+                fill_price.round_dp(2),
+                fees_f64,
+            ));
         }
     }
 }

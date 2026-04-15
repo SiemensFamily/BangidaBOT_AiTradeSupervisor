@@ -8,3 +8,4 @@ scalper-core = { path = "../scalper-core" }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
 tracing = { workspace = true }
+scalper-risk = { path = "../scalper-risk" }

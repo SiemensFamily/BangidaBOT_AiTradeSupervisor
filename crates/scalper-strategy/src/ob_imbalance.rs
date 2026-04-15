@@ -116,6 +116,7 @@ mod tests {
         ObImbalanceConfig {
             enabled: true,
             weight: 0.25,
+            min_imbalance_ratio: 0.20,
             imbalance_threshold: 0.30,
             take_profit_ticks: 3,
             stop_loss_ticks: 2,

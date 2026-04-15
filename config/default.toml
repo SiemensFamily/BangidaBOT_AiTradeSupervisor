@@ -2,123 +2,189 @@
 mode = "paper"
 
 [exchanges.binance]
-api_key = ""
-api_secret = ""
 base_url_rest = "https://testnet.binancefuture.com"
 base_url_ws = ""
 testnet = true
-
-[exchanges.binance.symbol_map]
-BTCUSDT = "BTCUSDT"
-ETHUSDT = "ETHUSDT"
-
-[exchanges.bybit]
 api_key = ""
 api_secret = ""
+
+[exchanges.binance.symbol_map]
+dogeusdt = "DOGEUSDT"
+ethusdt = "ETHUSDT"
+btcusdt = "BTCUSDT"
+
+[exchanges.bybit]
 base_url_rest = "https://api-testnet.bybit.com"
 base_url_ws = ""
 testnet = true
-
-[exchanges.bybit.symbol_map]
-ETHUSDT = "ETHUSDT"
-BTCUSDT = "BTCUSDT"
-
-[exchanges.okx]
 api_key = ""
 api_secret = ""
-passphrase = ""
+
+[exchanges.bybit.symbol_map]
+dogeusdt = "DOGEUSDT"
+ethusdt = "ETHUSDT"
+btcusdt = "BTCUSDT"
+
+[exchanges.okx]
 base_url_rest = "https://www.okx.com"
 base_url_ws = ""
 testnet = false
-
-[exchanges.kraken]
 api_key = ""
 api_secret = ""
+passphrase = ""
+
+[exchanges.okx.symbol_map]
+
+[exchanges.kraken]
 base_url_rest = "https://futures.kraken.com"
 base_url_ws = "wss://futures.kraken.com/ws/v1"
 testnet = false
+api_key = "3vQdfY87C4xXSlI397RZMp9WW+ibZGGktsGVZRlV1ONYrxlt//3PWgub"
+api_secret = "yZijtMgw0mr1W8TszmV86Uq9TImVBCyuneJhc8CV9slMiADGmBgkWaPS1vn4/NHIAq8h3yVmnl68nWAwb9jxkA=="
 
 [exchanges.kraken.symbol_map]
-ETHUSDT = "PI_ETHUSD"
-BTCUSDT = "PI_XBTUSD"
+btcusdt = "PI_XBTUSD"
+dogeusdt = "PF_DOGEUSD"
+ethusdt = "PI_ETHUSD"
 
-[trading]
-symbols = [
-    "BTCUSDT",
-    "ETHUSDT",
-]
-default_leverage = 10
-max_leverage = 20
+[account]
+initial_capital = 200.0
 
 [risk]
-max_risk_per_trade_pct = 2.0
+max_risk_per_trade = 0.012
+daily_drawdown_limit = 0.12
+max_consecutive_losses = 10
 max_daily_loss_pct = 10.0
 max_drawdown_pct = 25.0
-max_consecutive_losses = 10
-cooldown_minutes = 15
 min_equity = 25.0
-max_open_positions = 1
-max_trades_per_hour = 30
+max_trades_per_hour = 45
+cooldown_minutes = 15
+max_risk_per_trade_pct = 0.5
 max_leverage = 20
+max_open_positions = 1
+
+[execution]
+post_only = true
+max_slippage_bps = 5
 
 [strategy]
 ensemble_threshold = 0.25
+min_confluence_score = 0.4
+min_agreeing_strategies = 2
+
+[strategy.ensemble]
+min_strength_threshold = 0.48
+min_atr_ratio = 0.0015
+min_consensus = 2
 
 [strategy.momentum]
 enabled = true
-weight = 0.4
 volume_spike_multiplier = 2.0
+rsi_overbought = 77.73383940601788
+rsi_oversold = 21.78789578199577
 take_profit_pct = 0.5
 stop_loss_pct = 0.25
+weight = 0.4
 trailing_stop_pct = 0.2
-rsi_overbought = 80.0
-rsi_oversold = 20.0
 
 [strategy.ob_imbalance]
 enabled = true
-weight = 0.25
+min_imbalance_ratio = 0.25
 imbalance_threshold = 0.7
-take_profit_ticks = 17
-stop_loss_ticks = 3
+take_profit_ticks = 62
+stop_loss_ticks = 16
+weight = 0.25
 
 [strategy.liquidation_wick]
-enabled = false
-weight = 0.2
-price_velocity_threshold = 1.0
+enabled = true
 volume_spike_multiplier = 3.0
+price_velocity_threshold = 1.0
 take_profit_pct = 0.8
 stop_loss_pct = 0.4
+weight = 0.2
 
 [strategy.funding_bias]
-enabled = false
-weight = 0.15
+enabled = true
 funding_threshold = 0.05
 strength_boost = 0.1
+weight = 0.15
+
+[strategy.supertrend]
+enabled = true
+period = 10
+multiplier = 3.0
+
+[strategy.ema_pullback]
+enabled = true
+fast_period = 8
+slow_period = 18
+min_pullback_strength = 0.6
 
 [strategy.mean_reversion]
-enabled = false
-weight = 0.2
+enabled = true
+bb_penetration = 0.05
 rsi_oversold = 30.0
 rsi_overbought = 70.0
-bb_penetration = 0.05
+max_adx = 25.0
 atr_tp_multiplier = 1.5
 atr_sl_multiplier = 1.0
-max_adx = 25.0
+weight = 0.2
 
 [strategy.donchian]
-enabled = false
-weight = 0.3
+enabled = true
 entry_period = 20
-exit_period = 10
+use_trend_filter = false
 atr_tp_multiplier = 4.0
 atr_stop_multiplier = 2.0
-use_trend_filter = false
+weight = 0.3
+exit_period = 10
 
 [strategy.ma_cross]
-enabled = false
-weight = 0.3
+enabled = true
 fast_period = 21
 slow_period = 50
 min_spread_pct = 0.005
 atr_tp_multiplier = 3.0
 atr_stop_multiplier = 1.5
+weight = 0.3
+
+[strategy.cvd_divergence]
+enabled = true
+min_divergence_strength = 0.65
+weight = 0.2
+
+[strategy.volume_profile]
+enabled = false
+poc_lookback_bars = 50
+weight = 0.15
+
+[strategy.rsi_fvg]
+enabled = true
+rsi_overbought = 70.0
+rsi_oversold = 30.0
+weight = 0.2
+
+[strategy.session_retrace]
+enabled = false
+weight = 0.15
+
+[logging]
+level = "debug"
+console = true
+file_enabled = true
+file_path = "logs/bangida_bot.log"
+performance_log = "logs/performance_tracker.log"
+trade_log = "logs/trades.log"
+supervisor_log = "logs/ai_supervisor.log"
+performance_summary_interval = 60
+rotate_daily = true
+max_file_size_mb = 10
+
+[trading]
+symbols = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "DOGEUSDT",
+]
+default_leverage = 10
+max_leverage = 20

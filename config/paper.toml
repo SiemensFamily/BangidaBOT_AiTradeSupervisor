@@ -1,26 +1,34 @@
-# Paper trading overrides — uses testnet endpoints
-# Note: base_url_ws intentionally left empty for Binance/Bybit to prevent
-# unwanted connections. Only Kraken WS is configured in default.toml.
 [general]
 mode = "paper"
 
-[exchanges.binance]
-base_url_rest = "https://testnet.binancefuture.com"
-base_url_ws = ""
-testnet = true
-
-[exchanges.bybit]
-base_url_rest = "https://api-testnet.bybit.com"
-base_url_ws = ""
-testnet = true
-
 [account]
-initial_capital = 100.0
+initial_capital = 200.0
 
 [risk]
-max_risk_per_trade_pct = 0.4      # Lowered a bit more
-daily_loss_limit_pct = 1.5        # Tighter daily protection
+max_risk_per_trade = 0.012
+daily_drawdown_limit = 0.12
+max_trades_per_hour = 45
 
-[strategy]
-min_confluence_score = 0.40
-min_agreeing_strategies = 2
+[execution]
+post_only = true
+max_slippage_bps = 5
+max_hold_bars = 240
+
+[strategy.ensemble]
+min_strength_threshold = 0.48
+min_consensus = 2
+min_atr_ratio = 0.0015
+
+[strategy.ob_imbalance]
+min_imbalance_ratio = 0.25
+take_profit_ticks = 62
+stop_loss_ticks = 18
+
+[strategy.mean_reversion]
+enabled = true
+
+[strategy.donchian]
+enabled = true
+
+[strategy.ma_cross]
+enabled = true

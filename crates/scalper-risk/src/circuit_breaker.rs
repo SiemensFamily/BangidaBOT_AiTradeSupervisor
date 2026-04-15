@@ -177,6 +177,8 @@ mod tests {
 
     fn test_config() -> RiskConfig {
         RiskConfig {
+            max_risk_per_trade: 0.0,
+            daily_drawdown_limit: 0.0,
             max_risk_per_trade_pct: 1.0,
             max_daily_loss_pct: 5.0,
             max_drawdown_pct: 10.0,

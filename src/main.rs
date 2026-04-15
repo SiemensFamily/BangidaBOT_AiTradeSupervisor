@@ -8,24 +8,87 @@ use scalper_data::{
     orderbook::OrderBook,
     regime::RegimeDetector,
 };
-use scalper_execution::{executor::Executor, order_tracker::OrderTracker};
+use scalper_execution::order_tracker::OrderTracker;
+use scalper_execution::Executor;
 use scalper_risk::risk_manager::RiskManager;
+use scalper_risk::AiTradeSupervisor;
 use scalper_strategy::{
     ensemble::EnsembleStrategy,
-    StrategyVote,
     funding_arb::FundingBiasStrategy,
     liquidation_wick::LiquidationWickStrategy,
     momentum::MomentumStrategy,
     ob_imbalance::ObImbalanceStrategy,
+    mean_reversion::MeanReversionStrategy,
+    donchian::DonchianStrategy,
+    ma_cross::MaCrossStrategy,
+    strategies::{
+        SupertrendTrailingStrategy, EmaPullbackStrategy,
+        CvdDivergenceStrategy, VolumeProfileStrategy,
+        RsiFvgStrategy, SessionBasedRetraceStrategy,
+    },
     traits::{MarketContext, Strategy},
+    StrategyVote,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{error, info, warn};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+fn build_strategies(config: &ScalperConfig) -> Vec<Box<dyn Strategy>> {
+    let mut strategies: Vec<Box<dyn Strategy>> = Vec::new();
+
+    if config.strategy.momentum.enabled {
+        strategies.push(Box::new(MomentumStrategy::new(config.strategy.momentum.clone())));
+    }
+    if config.strategy.ob_imbalance.enabled {
+        strategies.push(Box::new(ObImbalanceStrategy::new(config.strategy.ob_imbalance.clone())));
+    }
+    if config.strategy.liquidation_wick.enabled {
+        strategies.push(Box::new(LiquidationWickStrategy::new(config.strategy.liquidation_wick.clone())));
+    }
+    if config.strategy.funding_bias.enabled {
+        strategies.push(Box::new(FundingBiasStrategy::new(config.strategy.funding_bias.clone())));
+    }
+
+    // Swing / trend-following strategies
+    if config.strategy.mean_reversion.enabled {
+        strategies.push(Box::new(MeanReversionStrategy::new(config.strategy.mean_reversion.clone())));
+    }
+    if config.strategy.donchian.enabled {
+        strategies.push(Box::new(DonchianStrategy::new(config.strategy.donchian.clone())));
+    }
+    if config.strategy.ma_cross.enabled {
+        strategies.push(Box::new(MaCrossStrategy::new(config.strategy.ma_cross.clone())));
+    }
+    if config.strategy.supertrend.enabled {
+        strategies.push(Box::new(SupertrendTrailingStrategy::new(config.strategy.supertrend.clone())));
+    }
+    if config.strategy.ema_pullback.enabled {
+        strategies.push(Box::new(EmaPullbackStrategy::new(config.strategy.ema_pullback.clone())));
+    }
+
+    // Order flow / advanced strategies
+    if config.strategy.cvd_divergence.enabled {
+        strategies.push(Box::new(CvdDivergenceStrategy::new(config.strategy.cvd_divergence.clone())));
+    }
+    if config.strategy.volume_profile.enabled {
+        strategies.push(Box::new(VolumeProfileStrategy::new(config.strategy.volume_profile.clone())));
+    }
+    if config.strategy.rsi_fvg.enabled {
+        strategies.push(Box::new(RsiFvgStrategy::new(config.strategy.rsi_fvg.clone())));
+    }
+    if config.strategy.session_retrace.enabled {
+        strategies.push(Box::new(SessionBasedRetraceStrategy::new(config.strategy.session_retrace.clone())));
+    }
+
+    info!("Loaded {} strategies (supervisor will dynamically weight them)", strategies.len());
+    strategies
+}
 
 mod dashboard;
+mod file_logger;
 mod paper_sim;
 mod auto_tuner;
 mod learning;
@@ -44,20 +107,63 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .json()
-        .init();
-
-    info!("Crypto Scalper starting...");
-
-    // Load configuration
+    // Load configuration first so we can use logging settings
     let mode = std::env::var("SCALPER__GENERAL__MODE").unwrap_or_else(|_| "paper".to_string());
     let config = ScalperConfig::load(&mode).context("Failed to load configuration")?;
+
+    // Initialize tracing using config.logging settings
+    let log_cfg = &config.logging;
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&log_cfg.level));
+
+    // File appender (optional, based on config)
+    let _file_guard = if log_cfg.file_enabled {
+        let log_path = std::path::Path::new(&log_cfg.file_path);
+        let log_dir = log_path.parent().unwrap_or_else(|| std::path::Path::new("logs"));
+        let log_file = log_path
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("bangida_bot.log"));
+
+        // Ensure log directory exists
+        let _ = std::fs::create_dir_all(log_dir);
+
+        let (file_appender, guard) = if log_cfg.rotate_daily {
+            tracing_appender::non_blocking(tracing_appender::rolling::daily(log_dir, log_file))
+        } else {
+            tracing_appender::non_blocking(tracing_appender::rolling::never(log_dir, log_file))
+        };
+
+        let file_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(file_appender)
+            .with_ansi(false);
+
+        if log_cfg.console {
+            let console_layer = tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(std::io::stdout);
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(file_layer)
+                .with(console_layer)
+                .init();
+        } else {
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(file_layer)
+                .init();
+        }
+        Some(guard)
+    } else {
+        // Console only
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .json()
+            .init();
+        None
+    };
+
+    info!("Crypto Scalper starting...");
 
     info!(
         mode = config.general.mode,
@@ -77,15 +183,24 @@ async fn main() -> Result<()> {
     }
 
     // Initialize risk manager
-    let initial_equity = config.risk.min_equity * 4.0; // Start at 4x min to have room
-    let risk_manager = Arc::new(Mutex::new(RiskManager::new(
-        config.risk.clone(),
-        initial_equity,
-    )));
+    let initial_equity = config.account.initial_capital;
+    let risk_manager = Arc::new(Mutex::new(RiskManager::new(config.risk.clone(), initial_equity)));
 
+    // Initialize dedicated file loggers
+    let trade_logger = Arc::new(file_logger::OptionalLogger(
+        file_logger::FileLogger::new(&config.logging.trade_log),
+    ));
+    let perf_logger = Arc::new(file_logger::OptionalLogger(
+        file_logger::FileLogger::new(&config.logging.performance_log),
+    ));
+    let supervisor_logger = Arc::new(file_logger::OptionalLogger(
+        file_logger::FileLogger::new(&config.logging.supervisor_log),
+    ));
+
+    let supervisor = Arc::new(Mutex::new(AiTradeSupervisor::new(0.40)));
     // Build strategies
     let strategies: Vec<Box<dyn Strategy>> = build_strategies(&config);
-    let ensemble = EnsembleStrategy::new(strategies, config.strategy.ensemble_threshold);
+    let ensemble = EnsembleStrategy::with_config(strategies, &config.strategy.ensemble);
 
     // Initialize execution
     let executor = Arc::new(Mutex::new(Executor::new()));
@@ -208,7 +323,7 @@ async fn main() -> Result<()> {
             let mut keys = vec![s.clone()];
             for cfg in [&config.exchanges.binance, &config.exchanges.bybit, &config.exchanges.kraken] {
                 if let Some(c) = cfg {
-                    if let Some(mapped) = c.symbol_map.get(s) {
+                    if let Some(mapped) = c.symbol_map.get(&s.to_lowercase()).or_else(|| c.symbol_map.get(s)) {
                         keys.push(mapped.clone());
                     }
                 }
@@ -355,6 +470,7 @@ async fn main() -> Result<()> {
         let indicators = indicators.clone();
         let signal_log = signal_log.clone();
         let console_log = console_log.clone();
+        let supervisor_logger = supervisor_logger.clone();
 
         tokio::spawn(async move {
             info!("Risk pipeline task started");
@@ -396,6 +512,17 @@ async fn main() -> Result<()> {
                     last_logged.insert(dedup_key, now_ms);
                 }
 
+                // Log supervisor decision
+                supervisor_logger.log(&serde_json::json!({
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "strategy": signal.strategy_name,
+                    "symbol": signal.symbol,
+                    "side": format!("{:?}", signal.side),
+                    "strength": signal.strength,
+                    "accepted": accepted.is_some(),
+                    "regime": format!("{:?}", regime),
+                }));
+
                 if let Some(validated) = accepted {
                     console_log.lock().await.push(format!(
                         "Signal accepted: {} {:?} {} (strength: {:.2})",
@@ -425,7 +552,7 @@ async fn main() -> Result<()> {
             let mut keys = vec![s.clone()];
             for cfg in [&config.exchanges.binance, &config.exchanges.bybit, &config.exchanges.kraken] {
                 if let Some(c) = cfg {
-                    if let Some(mapped) = c.symbol_map.get(s) {
+                    if let Some(mapped) = c.symbol_map.get(&s.to_lowercase()).or_else(|| c.symbol_map.get(s)) {
                         keys.push(mapped.clone());
                     }
                 }
@@ -524,19 +651,35 @@ async fn main() -> Result<()> {
     // Task g: PnL reporter
     {
         let risk_manager = risk_manager.clone();
+        let perf_logger = perf_logger.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+                config.logging.performance_summary_interval.max(10),
+            ));
             loop {
                 interval.tick().await;
                 let rm = risk_manager.lock().await;
                 let tracker = rm.pnl_tracker();
+                let equity = tracker.equity();
+                let drawdown = tracker.drawdown_pct();
+                let win_rate = tracker.win_rate() * 100.0;
+                let trades = tracker.total_trades();
+                let profit_factor = tracker.profit_factor();
                 info!(
-                    equity = tracker.equity(),
-                    drawdown = format!("{:.1}%", tracker.drawdown_pct()),
-                    win_rate = format!("{:.1}%", tracker.win_rate() * 100.0),
-                    trades = tracker.total_trades(),
+                    equity,
+                    drawdown = format!("{:.1}%", drawdown),
+                    win_rate = format!("{:.1}%", win_rate),
+                    trades,
                     "PnL Report"
                 );
+                perf_logger.log(&serde_json::json!({
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "equity": equity,
+                    "drawdown_pct": drawdown,
+                    "win_rate_pct": win_rate,
+                    "total_trades": trades,
+                    "profit_factor": profit_factor,
+                }));
             }
         });
     }
@@ -621,7 +764,9 @@ async fn main() -> Result<()> {
         for cfg in [&config.exchanges.binance, &config.exchanges.bybit, &config.exchanges.kraken] {
             if let Some(c) = cfg {
                 for (orig, mapped) in &c.symbol_map {
+                    // config crate lowercases keys; store under both original and uppercase
                     symbol_aliases.entry(orig.clone()).or_default().push(mapped.clone());
+                    symbol_aliases.entry(orig.to_uppercase()).or_default().push(mapped.clone());
                 }
             }
         }
@@ -656,12 +801,15 @@ async fn main() -> Result<()> {
         let risk_manager = risk_manager.clone();
         let trade_history = trade_history.clone();
         let console_log = console_log.clone();
+        let trade_logger = trade_logger.clone();
         tokio::spawn(paper_sim::run_paper_sim(
             order_tracker,
             orderbooks,
             risk_manager,
             trade_history,
             console_log,
+            supervisor.clone(),
+            trade_logger,
         ));
     }
 
@@ -718,61 +866,19 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Build all configured strategies.
-fn build_strategies(config: &ScalperConfig) -> Vec<Box<dyn Strategy>> {
-    let mut strategies: Vec<Box<dyn Strategy>> = Vec::new();
-
-    if config.strategy.momentum.enabled {
-        strategies.push(Box::new(MomentumStrategy::new(
-            config.strategy.momentum.clone(),
-        )));
-    }
-    if config.strategy.ob_imbalance.enabled {
-        strategies.push(Box::new(ObImbalanceStrategy::new(
-            config.strategy.ob_imbalance.clone(),
-        )));
-    }
-    if config.strategy.liquidation_wick.enabled {
-        strategies.push(Box::new(LiquidationWickStrategy::new(
-            config.strategy.liquidation_wick.clone(),
-        )));
-    }
-    if config.strategy.funding_bias.enabled {
-        strategies.push(Box::new(FundingBiasStrategy::new(
-            config.strategy.funding_bias.clone(),
-        )));
-    }
-    if config.strategy.mean_reversion.enabled {
-        strategies.push(Box::new(
-            scalper_strategy::mean_reversion::MeanReversionStrategy::new(
-                config.strategy.mean_reversion.clone(),
-            ),
-        ));
-    }
-    if config.strategy.donchian.enabled {
-        strategies.push(Box::new(
-            scalper_strategy::donchian::DonchianStrategy::new(
-                config.strategy.donchian.clone(),
-            ),
-        ));
-    }
-    if config.strategy.ma_cross.enabled {
-        strategies.push(Box::new(
-            scalper_strategy::ma_cross::MaCrossStrategy::new(
-                config.strategy.ma_cross.clone(),
-            ),
-        ));
-    }
-
-    info!("Loaded {} strategies", strategies.len());
-    strategies
-}
-
 /// Spawn WebSocket feed tasks for each configured exchange.
+/// Note: the `config` crate lowercases HashMap keys, so we do a case-insensitive lookup.
 fn map_symbols(symbols: &[String], cfg: &scalper_core::config::ExchangeConfig) -> Vec<String> {
     symbols
         .iter()
-        .map(|s| cfg.symbol_map.get(s).cloned().unwrap_or_else(|| s.clone()))
+        .map(|s| {
+            let key_lower = s.to_lowercase();
+            cfg.symbol_map
+                .get(&key_lower)
+                .or_else(|| cfg.symbol_map.get(s))
+                .cloned()
+                .unwrap_or_else(|| s.clone())
+        })
         .collect()
 }
 
@@ -840,33 +946,10 @@ fn spawn_exchange_feeds(
         info!("Bybit exchange not configured");
     }
 
-    if let Some(ref okx_cfg) = config.exchanges.okx {
-        if !okx_cfg.api_key.is_empty() && !okx_cfg.base_url_ws.is_empty() {
-            let feed = scalper_exchange::okx::OkxWsFeed::new(okx_cfg.clone());
-            let tx = market_tx.clone();
-            let syms = symbols.clone(); // OKX uses standard symbols
-            let ce = connected_exchanges.clone();
-            let cl = console_log.clone();
-            tokio::spawn(async move {
-                ce.lock().await.insert("okx".to_string());
-                cl.lock().await.push("OKX WebSocket connected".to_string());
-                if let Err(e) = scalper_exchange::MarketDataFeed::subscribe(&feed, &syms, tx).await {
-                    error!("OKX feed error: {e}");
-                    ce.lock().await.remove("okx");
-                    cl.lock().await.push(format!("OKX disconnected: {e}"));
-                }
-            });
-            info!("OKX WebSocket feed spawned");
-        } else {
-            info!(
-                api_key_set = !okx_cfg.api_key.is_empty(),
-                ws_url_set = !okx_cfg.base_url_ws.is_empty(),
-                "OKX feed skipped (missing api_key or base_url_ws)"
-            );
-        }
-    } else {
-        info!("OKX exchange not configured");
-    }
+    // OKX feed (currently disabled)
+    // if let Some(ref okx_cfg) = config.exchanges.okx {
+    //     ...
+    // }
 
     if let Some(ref kraken_cfg) = config.exchanges.kraken {
         if !kraken_cfg.api_key.is_empty() && !kraken_cfg.base_url_ws.is_empty() {
@@ -1123,7 +1206,7 @@ async fn process_market_event(
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
             {
-                let mut ph = price_history.lock().await;
+                let mut ph: tokio::sync::MutexGuard<'_, HashMap<String, VecDeque<(u64, f64)>>> = price_history.lock().await;
                 let entry = ph.entry(symbol.clone()).or_insert_with(VecDeque::new);
                 entry.push_back((ts, price_f64));
                 // Trim entries older than 60 seconds
@@ -1203,7 +1286,7 @@ async fn build_market_context(
 
     // Calculate price velocity from per-symbol price history
     let price_velocity_30s = {
-        let ph = price_history.lock().await;
+        let ph: tokio::sync::MutexGuard<'_, HashMap<String, VecDeque<(u64, f64)>>> = price_history.lock().await;
         if let Some(sym_history) = ph.get(symbol) {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

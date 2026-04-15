@@ -175,6 +175,7 @@ pub fn show(
                                 base_url_rest: String::new(),
                                 base_url_ws: String::new(),
                                 testnet: false,
+                                passphrase: None,
                                 symbol_map: Default::default(),
                             }
                         });
@@ -192,6 +193,7 @@ pub fn show(
                                 base_url_rest: String::new(),
                                 base_url_ws: String::new(),
                                 testnet: false,
+                                passphrase: None,
                                 symbol_map: Default::default(),
                             }
                         });
@@ -203,15 +205,20 @@ pub fn show(
                     .id_salt("okx")
                     .show(ui, |ui| {
                         let ex = cfg.exchanges.okx.get_or_insert_with(|| {
-                            scalper_core::OkxExchangeConfig {
+                            scalper_core::ExchangeConfig {
                                 api_key: String::new(),
                                 api_secret: String::new(),
-                                passphrase: String::new(),
                                 base_url_rest: String::new(),
                                 base_url_ws: String::new(),
                                 testnet: false,
+                                passphrase: Some(String::new()),
+                                symbol_map: Default::default(),
                             }
                         });
+                        // Ensure passphrase is Some for OKX so we can edit it
+                        if ex.passphrase.is_none() {
+                            ex.passphrase = Some(String::new());
+                        }
                         let mut changed = false;
                         ui.horizontal(|ui| {
                             ui.label("API Key:");
@@ -223,7 +230,9 @@ pub fn show(
                         });
                         ui.horizontal(|ui| {
                             ui.label("Passphrase:");
-                            changed |= ui.text_edit_singleline(&mut ex.passphrase).changed();
+                            if let Some(ref mut p) = ex.passphrase {
+                                changed |= ui.text_edit_singleline(p).changed();
+                            }
                         });
                         ui.horizontal(|ui| {
                             ui.label("REST URL:");
@@ -248,6 +257,7 @@ pub fn show(
                                 base_url_rest: String::new(),
                                 base_url_ws: String::new(),
                                 testnet: false,
+                                passphrase: None,
                                 symbol_map: Default::default(),
                             }
                         });

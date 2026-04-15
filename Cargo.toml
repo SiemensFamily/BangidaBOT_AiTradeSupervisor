@@ -48,6 +48,8 @@ chrono = { version = "0.4", features = ["serde"] }
 axum = { version = "0.8", features = ["ws"] }
 toml = "0.8"
 
+tracing-appender = "0.2"
+
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

@@ -1,12 +1,38 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScalperConfig {
     pub general: GeneralConfig,
     pub exchanges: ExchangesConfig,
-    pub trading: TradingConfig,
+    #[serde(default)]
+    pub account: AccountConfig,
     pub risk: RiskConfig,
+    #[serde(default)]
+    pub execution: ExecutionConfig,
     pub strategy: StrategyConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
+    #[serde(default)]
+    pub trading: TradingConfig,
+}
+
+impl ScalperConfig {
+    /// Load configuration with layered merging:
+    /// config/default.toml → config/{mode}.toml → env vars (SCALPER__*).
+    pub fn load(mode: &str) -> anyhow::Result<Self> {
+        let builder = config::Config::builder()
+            .add_source(config::File::with_name("config/default").required(true))
+            .add_source(config::File::with_name(&format!("config/{mode}")).required(false))
+            .add_source(
+                config::Environment::with_prefix("SCALPER")
+                    .separator("__")
+                    .try_parsing(true),
+            );
+        let settings = builder.build()?;
+        let cfg: ScalperConfig = settings.try_deserialize()?;
+        Ok(cfg)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,262 +40,393 @@ pub struct GeneralConfig {
     pub mode: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ExchangesConfig {
+    #[serde(default)]
     pub binance: Option<ExchangeConfig>,
+    #[serde(default)]
     pub bybit: Option<ExchangeConfig>,
-    pub okx: Option<OkxExchangeConfig>,
+    #[serde(default)]
+    pub okx: Option<ExchangeConfig>,
+    #[serde(default)]
     pub kraken: Option<ExchangeConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExchangeConfig {
-    pub api_key: String,
-    pub api_secret: String,
-    pub base_url_rest: String,
-    pub base_url_ws: String,
-    pub testnet: bool,
-    /// Per-exchange symbol mapping, e.g. { "BTCUSDT" = "PI_XBTUSD" } for Kraken.
     #[serde(default)]
-    pub symbol_map: std::collections::HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OkxExchangeConfig {
-    pub api_key: String,
-    pub api_secret: String,
-    pub passphrase: String,
     pub base_url_rest: String,
+    #[serde(default)]
     pub base_url_ws: String,
+    #[serde(default)]
     pub testnet: bool,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub api_secret: String,
+    #[serde(default)]
+    pub passphrase: Option<String>,
+    #[serde(default)]
+    pub symbol_map: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradingConfig {
+    #[serde(default = "default_symbols")]
     pub symbols: Vec<String>,
+    #[serde(default = "default_leverage")]
     pub default_leverage: u32,
+    #[serde(default = "default_leverage")]
     pub max_leverage: u32,
+}
+
+fn default_symbols() -> Vec<String> {
+    vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]
+}
+
+fn default_leverage() -> u32 {
+    10
+}
+
+impl Default for TradingConfig {
+    fn default() -> Self {
+        Self {
+            symbols: default_symbols(),
+            default_leverage: default_leverage(),
+            max_leverage: default_leverage(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountConfig {
+    #[serde(default = "default_initial_capital")]
+    pub initial_capital: f64,
+}
+
+fn default_initial_capital() -> f64 {
+    200.0
+}
+
+impl Default for AccountConfig {
+    fn default() -> Self {
+        Self { initial_capital: default_initial_capital() }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskConfig {
-    pub max_risk_per_trade_pct: f64,
+    #[serde(default)]
+    pub max_risk_per_trade: f64,
+    #[serde(default)]
+    pub daily_drawdown_limit: f64,
+    pub max_consecutive_losses: u32,
     pub max_daily_loss_pct: f64,
     pub max_drawdown_pct: f64,
-    pub max_consecutive_losses: u32,
-    pub cooldown_minutes: u32,
     pub min_equity: f64,
-    pub max_open_positions: u32,
     pub max_trades_per_hour: u32,
+    pub cooldown_minutes: u32,
+    pub max_risk_per_trade_pct: f64,
     pub max_leverage: u32,
+    #[serde(default = "default_max_open_positions")]
+    pub max_open_positions: u32,
 }
+
+fn default_max_open_positions() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionConfig {
+    #[serde(default)]
+    pub post_only: bool,
+    #[serde(default)]
+    pub max_slippage_bps: u32,
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            post_only: true,
+            max_slippage_bps: 5,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    #[serde(default = "default_log_level")]
+    pub level: String,
+    #[serde(default)]
+    pub console: bool,
+    #[serde(default)]
+    pub file_enabled: bool,
+    #[serde(default = "default_log_path")]
+    pub file_path: String,
+    #[serde(default = "default_perf_log")]
+    pub performance_log: String,
+    #[serde(default = "default_trade_log")]
+    pub trade_log: String,
+    #[serde(default = "default_supervisor_log")]
+    pub supervisor_log: String,
+    #[serde(default = "default_perf_interval")]
+    pub performance_summary_interval: u64,
+    #[serde(default)]
+    pub rotate_daily: bool,
+    #[serde(default = "default_max_log_size")]
+    pub max_file_size_mb: u64,
+}
+
+fn default_log_level() -> String { "info".to_string() }
+fn default_log_path() -> String { "logs/bangida_bot.log".to_string() }
+fn default_perf_log() -> String { "logs/performance_tracker.log".to_string() }
+fn default_trade_log() -> String { "logs/trades.log".to_string() }
+fn default_supervisor_log() -> String { "logs/ai_supervisor.log".to_string() }
+fn default_perf_interval() -> u64 { 60 }
+fn default_max_log_size() -> u64 { 10 }
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+            console: true,
+            file_enabled: false,
+            file_path: default_log_path(),
+            performance_log: default_perf_log(),
+            trade_log: default_trade_log(),
+            supervisor_log: default_supervisor_log(),
+            performance_summary_interval: default_perf_interval(),
+            rotate_daily: false,
+            max_file_size_mb: default_max_log_size(),
+        }
+    }
+}
+
+// ==================== STRATEGY CONFIG (FULL VERSION) ====================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategyConfig {
-    pub ensemble_threshold: f64,
+    #[serde(default)]
+    pub ensemble: EnsembleConfig,
+    #[serde(default)]
     pub momentum: MomentumConfig,
+    #[serde(default)]
     pub ob_imbalance: ObImbalanceConfig,
+    #[serde(default)]
     pub liquidation_wick: LiquidationWickConfig,
+    #[serde(default)]
     pub funding_bias: FundingBiasConfig,
-    #[serde(default = "default_mean_reversion_config")]
+    #[serde(default)]
+    pub supertrend: SupertrendConfig,
+    #[serde(default)]
+    pub ema_pullback: EmaPullbackConfig,
+
+    #[serde(default)]
     pub mean_reversion: MeanReversionConfig,
-    #[serde(default = "default_donchian_config")]
+    #[serde(default)]
     pub donchian: DonchianConfig,
-    #[serde(default = "default_ma_cross_config")]
+    #[serde(default)]
     pub ma_cross: MaCrossConfig,
+
+    // New strategies
+    #[serde(default)]
+    pub cvd_divergence: CvdDivergenceConfig,
+    #[serde(default)]
+    pub volume_profile: VolumeProfileConfig,
+    #[serde(default)]
+    pub rsi_fvg: RsiFvgConfig,
+    #[serde(default)]
+    pub session_retrace: SessionRetraceConfig,
+
+    // Flat fields from TOML (not part of sub-structs)
+    #[serde(default)]
+    pub ensemble_threshold: f64,
+    #[serde(default)]
+    pub min_confluence_score: f64,
+    #[serde(default)]
+    pub min_agreeing_strategies: u32,
 }
 
-fn default_mean_reversion_config() -> MeanReversionConfig {
-    MeanReversionConfig {
-        enabled: false,
-        weight: 0.20,
-        rsi_oversold: 30.0,
-        rsi_overbought: 70.0,
-        bb_penetration: 0.05,
-        atr_tp_multiplier: 1.5,
-        atr_sl_multiplier: 1.0,
-        max_adx: 25.0,
-    }
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EnsembleConfig {
+    #[serde(default)]
+    pub min_strength_threshold: f64,
+    /// Minimum ATR-to-price ratio required to approve a signal.
+    /// Filters out low-volatility chop where TP/SL targets won't be reached.
+    /// E.g. 0.0015 = 0.15% minimum ATR. Set to 0.0 to disable.
+    #[serde(default)]
+    pub min_atr_ratio: f64,
+    /// Minimum number of agreeing strategies (0 or unset = 2 default).
+    #[serde(default)]
+    pub min_consensus: u32,
 }
 
-fn default_donchian_config() -> DonchianConfig {
-    DonchianConfig {
-        enabled: false,
-        weight: 0.30,
-        entry_period: 20,
-        exit_period: 10,
-        atr_tp_multiplier: 4.0,
-        atr_stop_multiplier: 2.0,
-        use_trend_filter: false,
-    }
-}
-
-fn default_ma_cross_config() -> MaCrossConfig {
-    MaCrossConfig {
-        enabled: false,
-        weight: 0.30,
-        fast_period: 21,
-        slow_period: 50,
-        min_spread_pct: 0.005,
-        atr_tp_multiplier: 3.0,
-        atr_stop_multiplier: 1.5,
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MomentumConfig {
     pub enabled: bool,
-    pub weight: f64,
+    #[serde(default)]
     pub volume_spike_multiplier: f64,
-    pub take_profit_pct: f64,
-    pub stop_loss_pct: f64,
-    pub trailing_stop_pct: f64,
+    #[serde(default)]
     pub rsi_overbought: f64,
+    #[serde(default)]
     pub rsi_oversold: f64,
+    #[serde(default)]
+    pub take_profit_pct: f64,
+    #[serde(default)]
+    pub stop_loss_pct: f64,
+    #[serde(default)]
+    pub weight: f64,
+    #[serde(default)]
+    pub trailing_stop_pct: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ObImbalanceConfig {
     pub enabled: bool,
-    pub weight: f64,
+    #[serde(default)]
+    pub min_imbalance_ratio: f64,
+    #[serde(default)]
     pub imbalance_threshold: f64,
+    #[serde(default)]
     pub take_profit_ticks: u32,
+    #[serde(default)]
     pub stop_loss_ticks: u32,
+    #[serde(default)]
+    pub weight: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LiquidationWickConfig {
     pub enabled: bool,
-    pub weight: f64,
-    pub price_velocity_threshold: f64,
+    #[serde(default)]
     pub volume_spike_multiplier: f64,
+    #[serde(default)]
+    pub price_velocity_threshold: f64,
+    #[serde(default)]
     pub take_profit_pct: f64,
+    #[serde(default)]
     pub stop_loss_pct: f64,
+    #[serde(default)]
+    pub weight: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FundingBiasConfig {
     pub enabled: bool,
-    pub weight: f64,
+    #[serde(default)]
     pub funding_threshold: f64,
+    #[serde(default)]
     pub strength_boost: f64,
+    #[serde(default)]
+    pub weight: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SupertrendConfig {
+    pub enabled: bool,
+    #[serde(default)]
+    pub period: u32,
+    #[serde(default)]
+    pub multiplier: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EmaPullbackConfig {
+    pub enabled: bool,
+    #[serde(default)]
+    pub fast_period: u32,
+    #[serde(default)]
+    pub slow_period: u32,
+    #[serde(default)]
+    pub min_pullback_strength: f64,
+}
+
+// Legacy configs (with all fields the files expect)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MeanReversionConfig {
     pub enabled: bool,
-    pub weight: f64,
-    /// RSI threshold below which we consider the market oversold (long entries).
-    pub rsi_oversold: f64,
-    /// RSI threshold above which we consider the market overbought (short entries).
-    pub rsi_overbought: f64,
-    /// How far outside the Bollinger band the price must poke, measured
-    /// as a fraction of the band-width. 0.05 = 5% of the band-width.
+    #[serde(default)]
     pub bb_penetration: f64,
-    /// Take-profit distance in ATR multiples from entry.
-    pub atr_tp_multiplier: f64,
-    /// Stop-loss distance in ATR multiples from entry.
-    pub atr_sl_multiplier: f64,
-    /// Skip entries when ADX is above this value (i.e., market is trending).
-    /// Mean reversion works best in ranging markets.
+    #[serde(default)]
+    pub rsi_oversold: f64,
+    #[serde(default)]
+    pub rsi_overbought: f64,
+    #[serde(default)]
     pub max_adx: f64,
+    #[serde(default)]
+    pub atr_tp_multiplier: f64,
+    #[serde(default)]
+    pub atr_sl_multiplier: f64,
+    #[serde(default)]
+    pub weight: f64,
 }
 
-/// Donchian Channel Breakout config. Classic Turtle Trading setup.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DonchianConfig {
     pub enabled: bool,
-    pub weight: f64,
-    /// Bar lookback for the entry channel. Supported: 10, 20, 55.
+    #[serde(default)]
     pub entry_period: u32,
-    /// Bar lookback for the exit channel (should be shorter than entry).
-    /// Supported: 10, 20, 55. Not currently enforced by the strategy — the
-    /// backtest harness uses max_hold_bars as the safety net exit instead.
-    pub exit_period: u32,
-    /// Take-profit distance in ATR multiples (wide for trend following).
-    pub atr_tp_multiplier: f64,
-    /// Stop-loss distance in ATR multiples from entry.
-    pub atr_stop_multiplier: f64,
-    /// If true, only take longs when price > EMA-200 (and shorts when
-    /// price < EMA-200). Filters out counter-trend breakouts.
+    #[serde(default)]
     pub use_trend_filter: bool,
+    #[serde(default)]
+    pub atr_tp_multiplier: f64,
+    #[serde(default)]
+    pub atr_stop_multiplier: f64,
+    #[serde(default)]
+    pub weight: f64,
+    #[serde(default)]
+    pub exit_period: u32,
 }
 
-/// Moving Average Crossover config. Canonical swing-trading setup.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MaCrossConfig {
     pub enabled: bool,
-    pub weight: f64,
-    /// Fast EMA period. Supported values (pre-computed): 9, 21, 50, 200.
+    #[serde(default)]
     pub fast_period: u32,
-    /// Slow EMA period. Supported values (pre-computed): 9, 21, 50, 200.
+    #[serde(default)]
     pub slow_period: u32,
-    /// Minimum spread between fast and slow as a fraction of price
-    /// (e.g. 0.005 = 0.5%). Filters out weak crosses.
+    #[serde(default)]
     pub min_spread_pct: f64,
-    /// Take-profit distance in ATR multiples.
+    #[serde(default)]
     pub atr_tp_multiplier: f64,
-    /// Stop-loss distance in ATR multiples.
+    #[serde(default)]
     pub atr_stop_multiplier: f64,
+    #[serde(default)]
+    pub weight: f64,
 }
 
-impl ScalperConfig {
-    /// Load configuration by merging:
-    /// 1. config/default.toml (base defaults)
-    /// 2. config/{mode}.toml (mode-specific overrides, e.g. paper.toml, live.toml)
-    /// 3. Environment variables with prefix "SCALPER" (e.g. SCALPER_GENERAL__MODE)
-    pub fn load(mode: &str) -> anyhow::Result<Self> {
-        let builder = config::Config::builder()
-            .add_source(config::File::with_name("config/default").required(true))
-            .add_source(
-                config::File::with_name(&format!("config/{}", mode)).required(false),
-            )
-            .add_source(
-                config::Environment::with_prefix("SCALPER")
-                    .prefix_separator("__")
-                    .separator("__")
-                    .try_parsing(true),
-            );
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CvdDivergenceConfig {
+    pub enabled: bool,
+    #[serde(default)]
+    pub min_divergence_strength: f64,
+    #[serde(default)]
+    pub weight: f64,
+}
 
-        let settings = builder.build()?;
-        let mut cfg: ScalperConfig = settings.try_deserialize()?;
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VolumeProfileConfig {
+    pub enabled: bool,
+    #[serde(default)]
+    pub poc_lookback_bars: u32,
+    #[serde(default)]
+    pub weight: f64,
+}
 
-        // The config crate's Environment source can wipe nested HashMaps like
-        // symbol_map because env vars can only express leaf values. It also
-        // lowercases all keys from merged TOML tables, so symbol_map keys
-        // arrive as "btcusdt" instead of "BTCUSDT". Re-uppercase the keys and
-        // backfill known defaults when the map is empty.
-        let normalize_map = |map: &mut std::collections::HashMap<String, String>| {
-            let entries: Vec<(String, String)> = map
-                .drain()
-                .map(|(k, v)| (k.to_uppercase(), v))
-                .collect();
-            for (k, v) in entries {
-                map.insert(k, v);
-            }
-        };
-        if let Some(ref mut kraken) = cfg.exchanges.kraken {
-            normalize_map(&mut kraken.symbol_map);
-            if kraken.symbol_map.is_empty() {
-                kraken.symbol_map.insert("BTCUSDT".into(), "PI_XBTUSD".into());
-                kraken.symbol_map.insert("ETHUSDT".into(), "PI_ETHUSD".into());
-            }
-        }
-        if let Some(ref mut binance) = cfg.exchanges.binance {
-            normalize_map(&mut binance.symbol_map);
-            if binance.symbol_map.is_empty() {
-                binance.symbol_map.insert("BTCUSDT".into(), "BTCUSDT".into());
-                binance.symbol_map.insert("ETHUSDT".into(), "ETHUSDT".into());
-            }
-        }
-        if let Some(ref mut bybit) = cfg.exchanges.bybit {
-            normalize_map(&mut bybit.symbol_map);
-            if bybit.symbol_map.is_empty() {
-                bybit.symbol_map.insert("BTCUSDT".into(), "BTCUSDT".into());
-                bybit.symbol_map.insert("ETHUSDT".into(), "ETHUSDT".into());
-            }
-        }
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RsiFvgConfig {
+    pub enabled: bool,
+    #[serde(default)]
+    pub rsi_overbought: f64,
+    #[serde(default)]
+    pub rsi_oversold: f64,
+    #[serde(default)]
+    pub weight: f64,
+}
 
-        Ok(cfg)
-    }
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SessionRetraceConfig {
+    pub enabled: bool,
+    #[serde(default)]
+    pub weight: f64,
 }
